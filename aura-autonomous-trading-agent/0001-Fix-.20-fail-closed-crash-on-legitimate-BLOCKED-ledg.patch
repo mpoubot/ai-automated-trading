@@ -1,0 +1,203 @@
+From 7908ac686cc1ecf0bf4f649c1cd8d0538a3cc3f9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 4 Sep 2026 21:28:48 +0000
+Subject: [PATCH] Fix .20 fail-closed crash on legitimate BLOCKED ledger events
+
+Root cause of the runtime crash Martin hit at cycle 20260904T193619Z:
+v0.5.3.14's Risk Gate requires BTC/USD and ETH/USD to report the same
+market-state timestamp (verify_timestamp_synchronization). When they
+don't match, it blocks the whole cycle for both required symbols with
+risk_decision = "BLOCKED", regardless of each symbol's own individual
+decision. v0.5.3.17 already documents "BLOCKED" as a legitimate,
+accepted ledger_event value, but v0.5.3.20 (Paper Fill Simulator) had
+no handling for it: it fell through to build_observed()'s catch-all
+"Unsupported ledger event" ValueError and aborted the whole --once
+cycle before v0.5.3.18/.19 ever ran.
+
+v0.5.3.18 and v0.5.3.19 already degrade gracefully on this input (they
+mark the envelope BLOCKED without raising), so v0.5.3.20 was the only
+crash point in the .14-.19 chain.
+
+Fix: v0.5.3.20 now accepts "BLOCKED" as an allowed ledger_event and
+simulates it the same way as NO_ORDER_RECORDED (REJECTED, no position,
+no fabricated fill), tagged with its own simulation_reason
+(UPSTREAM_LEDGER_BLOCKED) so a genuinely blocked cycle is never
+indistinguishable from an ordinary no-signal cycle downstream.
+
+This does not address why ETH/USD's bar data desynchronized from
+BTC/USD's in the first place -- that live data-freshness question is
+deliberately out of scope for this change, per explicit instruction.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05320_paper_fill_simulator.py           | 29 ++++++-
+ ..._v05320_paper_fill_simulator_validation.py | 84 ++++++++++++++++++-
+ 2 files changed, 111 insertions(+), 2 deletions(-)
+
+diff --git a/aura_v05320_paper_fill_simulator.py b/aura_v05320_paper_fill_simulator.py
+index 2bf368e..dd80aff 100644
+--- a/aura_v05320_paper_fill_simulator.py
++++ b/aura_v05320_paper_fill_simulator.py
+@@ -34,7 +34,14 @@ Pipeline:
+ The simulator is deterministic. It never uses the current clock. A simulation
+ configuration supplies the timestamp and, for filled intents, the fill price.
+ If no configuration is supplied, the safe default is PENDING for every paper
+-order intent and REJECTED for NO_ORDER records.
++order intent and REJECTED for NO_ORDER records. A BLOCKED ledger entry (the
++Risk Gate or another upstream stage refused the whole cycle for this symbol,
++e.g. an unsynchronized required-symbol market-data timestamp) is also a
++legitimate, expected ledger_event -- v0.5.3.17 documents it as an already-
++accepted execution_decision value. It always carries no position/fill claim,
++exactly like NO_ORDER_RECORDED, so it is simulated the same way: REJECTED,
++no position, no fabricated fill -- tagged with its own simulation_reason so
++it is never conflated with an ordinary no-order cycle.
+ 
+ Default input:
+     regime_output/decision_execution_ledger/decision_execution_ledger.json
+@@ -86,6 +93,7 @@ SYMBOLS = ("BTC/USD", "ETH/USD")
+ ALLOWED_LEDGER_EVENTS = {
+     "NO_ORDER_RECORDED",
+     "PAPER_ORDER_INTENT_RECORDED",
++    "BLOCKED",
+ }
+ ALLOWED_POLICIES = {"PENDING", "FILLED", "REJECTED", "CANCELED"}
+ DEFAULT_CONFIG: dict[str, Any] = {
+@@ -316,6 +324,25 @@ def build_observed(
+             }
+             continue
+ 
++        if event == "BLOCKED":
++            # The cycle was refused upstream of v0.5.3.17 for this symbol
++            # (e.g. Risk Gate's required-symbol timestamp-synchronization
++            # gate). No order was ever recorded, so this is simulated
++            # identically to NO_ORDER_RECORDED -- REJECTED, no position, no
++            # fabricated fill -- but tagged with its own reason so a
++            # genuinely blocked cycle is never indistinguishable from an
++            # ordinary no-signal cycle in the simulated observation.
++            result["observations"][symbol] = {
++                "symbol": symbol,
++                "order_status": "REJECTED",
++                "position_exists": False,
++                "position_id": None,
++                "fill_price": None,
++                "fill_timestamp": None,
++                "simulation_reason": "UPSTREAM_LEDGER_BLOCKED",
++            }
++            continue
++
+         if event != "PAPER_ORDER_INTENT_RECORDED":
+             raise ValueError(f"Unsupported ledger event for {symbol}: {event}")
+ 
+diff --git a/tests/aura_v05320_paper_fill_simulator_validation.py b/tests/aura_v05320_paper_fill_simulator_validation.py
+index 7ca806f..0a14995 100644
+--- a/tests/aura_v05320_paper_fill_simulator_validation.py
++++ b/tests/aura_v05320_paper_fill_simulator_validation.py
+@@ -10,7 +10,10 @@ Validates:
+   3. explicit FILLED configuration creates deterministic simulated fills;
+   4. the observed snapshot hash matches v0.5.3.18's canonical contract;
+   5. tampered upstream ledger input fails closed;
+-  6. no exchange/live-execution capability is exposed by the output.
++  6. no exchange/live-execution capability is exposed by the output;
++  7. a legitimate BLOCKED ledger entry (e.g. Risk Gate's required-symbol
++     timestamp-synchronization gate) is simulated as a rejected, no-position
++     observation instead of crashing the cycle fail-closed.
+ 
+ Usage from repository root:
+     python .\tests\aura_v05320_paper_fill_simulator_validation.py
+@@ -139,6 +142,66 @@ def make_ledger(tmp: Path, intents: bool) -> Path:
+     return path
+ 
+ 
++def make_blocked_ledger(tmp: Path) -> Path:
++    """
++    Mirrors a v0.5.3.17 ledger produced when v0.5.3.14's Risk Gate blocks the
++    whole cycle for the required symbols (e.g. an unsynchronized required-
++    symbol market-data timestamp) -- ledger_event is legitimately "BLOCKED"
++    for every required symbol, per v0.5.3.17's own documented contract.
++    """
++    entries: dict[str, Any] = {}
++    for symbol in SYMBOLS:
++        entries[symbol] = {
++            "symbol": symbol,
++            "ledger_event": "BLOCKED",
++            "upstream_execution_decision": "BLOCKED",
++            "paper_order_intent": False,
++            "order_status": "NOT_APPLICABLE",
++            "position_exists": False,
++            "position_id": None,
++            "fill_price": None,
++            "fill_timestamp": None,
++            "reason": "UPSTREAM_OR_INTEGRITY_CHECK_FAILED",
++        }
++
++    payload: dict[str, Any] = {
++        "agent_version": "AURA v0.5.3.17",
++        "engine": "DECISION_EXECUTION_LEDGER",
++        "decision_status": "DECIDED",
++        "overall_ledger_decision": "BLOCKED",
++        "input_paper_execution_hash": "PE-VALIDATION",
++        "upstream_state_id": "PE-VALIDATION",
++        "upstream_hash_verified": True,
++        "frozen_configuration_verified": True,
++        "ledger_entries": entries,
++        "blocked_reasons": ["SYMBOL_STATE_TIMESTAMPS_NOT_SYNCHRONIZED"],
++        "state_hash": None,
++        "state_id": None,
++        "guardrails": {
++            "single_source_of_truth": True,
++            "market_data_fetch": False,
++            "indicator_recalculation": False,
++            "signal_recalculation": False,
++            "risk_recalculation": False,
++            "position_sizing": False,
++            "position_creation": False,
++            "exchange_state_mutation": False,
++            "orders_allowed": False,
++            "paper_execution": False,
++            "live_execution": False,
++            "ledger_authorization": False,
++            "ledger_state_mutation": False,
++            "position_claim_from_ledger": False,
++        },
++    }
++    payload["state_hash"] = canonical_ledger_hash(payload)
++    payload["state_id"] = f"LE-{payload['state_hash'][:24]}"
++
++    path = tmp / "ledger_blocked.json"
++    write(path, payload)
++    return path
++
++
+ def run_simulator(input_path: Path, output_path: Path, config_path: Path | None = None) -> tuple[int, str]:
+     cmd = [sys.executable, str(SCRIPT), "--input", str(input_path), "--output", str(output_path)]
+     if config_path is not None:
+@@ -199,6 +262,25 @@ def main() -> int:
+ 
+         case("NO_ORDER produces no-position observation", test_no_order)
+ 
++        def test_blocked_ledger_event() -> None:
++            ledger = make_blocked_ledger(tmp)
++            output = tmp / "observed_blocked.json"
++            rc, out = run_simulator(ledger, output)
++            assert_true(rc == 0, out[-1200:])
++            payload = load(output)
++            for symbol in SYMBOLS:
++                item = payload["observations"][symbol]
++                assert_true(item["order_status"] == "REJECTED", f"{symbol} not rejected")
++                assert_true(item["position_exists"] is False, f"{symbol} position claimed")
++                assert_true(item["fill_price"] is None, f"{symbol} fabricated fill price")
++                assert_true(item["fill_timestamp"] is None, f"{symbol} fabricated timestamp")
++                assert_true(
++                    item["simulation_reason"] == "UPSTREAM_LEDGER_BLOCKED",
++                    f"{symbol} wrong simulation_reason: {item['simulation_reason']}",
++                )
++
++        case("BLOCKED ledger event is simulated, not fail-closed", test_blocked_ledger_event)
++
+         def test_default_pending() -> None:
+             ledger = make_ledger(tmp, intents=True)
+             output = tmp / "observed_pending.json"
+-- 
+2.43.0
+

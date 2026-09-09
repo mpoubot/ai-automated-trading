@@ -1,0 +1,210 @@
+From a10a6240c64aefb925098d96f8882fa2f094aa39 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 17:54:19 +0000
+Subject: [PATCH 08/10] .23 Execution Specification Builder: support full coin
+ universe
+
+Unlike .13-.19, this file already evaluated every symbol fully
+independently -- one symbol's BLOCKED status never affected another's, or
+the overall_status, beyond the ready_count tally -- so no new required-
+vs-optional gating logic was needed, only widening the fixed BTC/ETH loop
+to the full discovered coin universe:
+
+- build_specs()'s main loop now iterates every symbol either the
+  v0.5.3.13 signal or v0.5.3.19 safety payload reported (union with the
+  new REQUIRED_SYMBOLS alias for BTC/ETH), instead of a fixed 2-symbol
+  tuple.
+- The shared-upstream-validation-failure branch (malformed/unverified
+  signal or safety payload) now reports REQUIRED_SYMBOLS plus whatever
+  symbols either payload's own decisions dict named, instead of silently
+  dropping any symbol beyond BTC/ETH from that report.
+- print_report() iterates actual decisions instead of a fixed BTC/ETH
+  tuple, labeling each symbol REQUIRED/OPTIONAL.
+
+Direction policy (empty-by-default allowlists, BEAR never implicitly
+mapped to SELL), quantity policy (never fabricated, always from
+--sizing-config), and the hard execution_authorized-must-already-be-True
+boundary are all untouched by this change.
+
+Adds 2 contract tests to the existing suite covering a symbol beyond the
+required pair getting its own independent spec attempt (ready while
+BTC/ETH stay blocked on an unvalidated direction) and an optional
+symbol's own missing quantity blocking only that symbol. All 8 tests in
+this file pass, including the existing BEAR-never-SELL and adapter-
+interop tests, unchanged. Full suite (81 tests) green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ ..._v05323_execution_specification_builder.py | 37 +++++++-
+ ..._v05323_execution_specification_builder.py | 84 +++++++++++++++++++
+ 2 files changed, 117 insertions(+), 4 deletions(-)
+
+diff --git a/aura_v05323_execution_specification_builder.py b/aura_v05323_execution_specification_builder.py
+index a262a17..6ae453c 100644
+--- a/aura_v05323_execution_specification_builder.py
++++ b/aura_v05323_execution_specification_builder.py
+@@ -99,6 +99,14 @@ DEFAULT_OUTPUT = Path(
+ )
+ 
+ SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH are always considered even if somehow
++# absent from either upstream payload's decisions. Kept as a separate name
++# (aliased to SYMBOLS) so the rest of this file reads unambiguously --
++# mirrors the same alias in v0.5.3.13-.19. Note this file already treats
++# every symbol fully independently (one symbol's BLOCKED status has never
++# affected another's, or the overall_status, beyond ready_count) -- so
++# widening from a fixed BTC/ETH pair to the full discovered coin universe
++# needs no new required-vs-optional gating logic, only a wider loop.
+ 
+ # --- Direction policy: explicit, closed, empty by default. -----------------
+ # Do not add "BEAR x LOW ATR x POSITIVE bar-2" to either set without a
+@@ -297,7 +305,16 @@ def build_specs(
+ 
+     if shared_errors:
+         result["blocked_reasons"] = shared_errors
+-        for symbol in SYMBOLS:
++        # Envelope-level failure -- the upstream payloads themselves may be
++        # too malformed to trust their "decisions" keys, so report at least
++        # REQUIRED_SYMBOLS plus whatever symbols either side did manage to
++        # name.
++        reported_symbols = set(REQUIRED_SYMBOLS)
++        for payload in (signal_payload, safety_payload):
++            decisions = payload.get("decisions")
++            if isinstance(decisions, dict):
++                reported_symbols.update(decisions.keys())
++        for symbol in sorted(reported_symbols):
+             result["decisions"][symbol] = {
+                 "symbol": symbol,
+                 "status": "BLOCKED",
+@@ -310,7 +327,17 @@ def build_specs(
+ 
+     ready_count = 0
+ 
+-    for symbol in SYMBOLS:
++    # Every symbol reported by either upstream source gets its own spec
++    # attempt; REQUIRED_SYMBOLS are added even if somehow absent. Each
++    # symbol was already fully independent before this change (one
++    # symbol's BLOCKED status never affected another's), so no new
++    # required-vs-optional gating is introduced here -- this just widens
++    # the loop to the full discovered coin universe.
++    selected_symbols = sorted(
++        set(signal_decisions.keys()) | set(safety_decisions.keys()) | set(REQUIRED_SYMBOLS)
++    )
++
++    for symbol in selected_symbols:
+         signal_item = signal_decisions.get(symbol)
+         safety_item = safety_decisions.get(symbol)
+ 
+@@ -425,9 +452,11 @@ def print_report(result: dict[str, Any], output_path: Path) -> None:
+     print(f"OVERALL              : {result['overall_status']}")
+     print(f"STATE ID             : {result['state_id']}")
+     print()
+-    for symbol in SYMBOLS:
++    reported_symbols = sorted(set(result["decisions"].keys()) | set(REQUIRED_SYMBOLS))
++    for symbol in reported_symbols:
+         item = result["decisions"].get(symbol, {})
+-        print(symbol)
++        label = symbol + ("  [REQUIRED]" if symbol in REQUIRED_SYMBOLS else "  [OPTIONAL]")
++        print(label)
+         print(f"  STATUS             : {item.get('status')}")
+         print(f"  REASON             : {item.get('reason')}")
+         if "regime_state" in item:
+diff --git a/tests/test_aura_v05323_execution_specification_builder.py b/tests/test_aura_v05323_execution_specification_builder.py
+index b9cbb58..325179f 100644
+--- a/tests/test_aura_v05323_execution_specification_builder.py
++++ b/tests/test_aura_v05323_execution_specification_builder.py
+@@ -230,6 +230,90 @@ def test_missing_symbol_execution_authorization_blocks_that_symbol_only():
+     expect("ETH/USD blocked on authorization", result["decisions"]["ETH/USD"]["reason"] == "SYMBOL_EXECUTION_NOT_AUTHORIZED")
+ 
+ 
++# ---------------------------------------------------------------------------
++# All-coin-universe: symbols beyond the fixed BTC/ETH pair are picked up
++# from whatever the upstream signal/safety decisions actually report, and
++# remain fully independent of each other and of the required pair.
++# ---------------------------------------------------------------------------
++
++
++def _with_symbol(signal_payload, safety_payload, symbol, *, regime_state, authorized):
++    signal_payload = dict(signal_payload)
++    signal_payload["decisions"] = dict(signal_payload["decisions"])
++    signal_payload["decisions"][symbol] = {
++        "symbol": symbol,
++        "decision": "SIGNAL_CANDIDATE",
++        "market_state_valid": True,
++        "candidate_match": True,
++        "state_timestamp": "2026-09-01T00:00:00Z",
++        "state_id": None,
++        "regime_state": regime_state,
++        "reason": "FROZEN_CANDIDATE_MATCH",
++    }
++    safety_payload = dict(safety_payload)
++    safety_payload["decisions"] = dict(safety_payload["decisions"])
++    safety_payload["decisions"][symbol] = {
++        "symbol": symbol,
++        "reconciliation_state": "NO_ORDER_CONFIRMED",
++        "execution_safety": "SAFE_NO_ORDER" if authorized else "BLOCKED",
++        "execution_authorized": authorized,
++        "reason": "TEST_FIXTURE",
++    }
++    # The safety payload carries its own self-hash (state_hash/state_id)
++    # that build_specs() verifies -- adding a symbol after make_safety_payload()
++    # already hashed it would otherwise trip SAFETY_STATE_HASH_MISMATCH.
++    # Recompute exactly as make_safety_payload() does.
++    state_hash = builder.canonical_execution_safety_hash(safety_payload)
++    safety_payload["state_hash"] = state_hash
++    safety_payload["state_id"] = f"ES-{state_hash[:24]}"
++    return signal_payload, safety_payload
++
++
++def test_optional_symbol_beyond_required_pair_gets_its_own_spec_attempt():
++    original = builder.VALIDATED_LONG_ENTRY_REGIME_LABELS
++    try:
++        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = frozenset({"TEST_VALIDATED_LONG"})
++        signal = make_signal_payload({s: FROZEN_BEAR_CANDIDATE for s in SYMBOLS})
++        safety = make_safety_payload()
++        signal, safety = _with_symbol(
++            signal, safety, "AVAX/USD", regime_state="TEST_VALIDATED_LONG", authorized=True
++        )
++        result = run_build(signal, safety, sizing_config={**{s: 0.01 for s in SYMBOLS}, "AVAX/USD": 1.5})
++
++        expect("overall status is EXECUTION_SPEC_READY", result["overall_status"] == "EXECUTION_SPEC_READY")
++        avax = result["decisions"]["AVAX/USD"]
++        expect("AVAX/USD spec ready", avax["status"] == "EXECUTION_SPEC_READY")
++        expect("AVAX/USD side is BUY", avax["execution_specification"]["side"] == "BUY")
++        # Required BTC/ETH pair (still BEAR, unvalidated) stays blocked and
++        # unaffected by AVAX's readiness.
++        for symbol in SYMBOLS:
++            expect(f"{symbol} still blocked on direction", result["decisions"][symbol]["status"] == "BLOCKED")
++    finally:
++        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = original
++
++
++def test_optional_symbol_missing_quantity_blocks_only_that_symbol():
++    original = builder.VALIDATED_LONG_ENTRY_REGIME_LABELS
++    try:
++        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = frozenset({"TEST_VALIDATED_LONG"})
++        signal = make_signal_payload({s: "TEST_VALIDATED_LONG" for s in SYMBOLS})
++        safety = make_safety_payload()
++        signal, safety = _with_symbol(
++            signal, safety, "AVAX/USD", regime_state="TEST_VALIDATED_LONG", authorized=True
++        )
++        # No sizing entry at all for AVAX/USD.
++        result = run_build(signal, safety, sizing_config={s: 0.01 for s in SYMBOLS})
++
++        expect("overall status is EXECUTION_SPEC_READY", result["overall_status"] == "EXECUTION_SPEC_READY")
++        for symbol in SYMBOLS:
++            expect(f"{symbol} spec ready", result["decisions"][symbol]["status"] == "EXECUTION_SPEC_READY")
++        avax = result["decisions"]["AVAX/USD"]
++        expect("AVAX/USD blocked without a quantity source", avax["status"] == "BLOCKED")
++        expect("AVAX/USD reason is MISSING_QUANTITY_SOURCE", avax["reason"] == "MISSING_QUANTITY_SOURCE")
++    finally:
++        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = original
++
++
+ def main() -> int:
+     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
+     for test in tests:
+-- 
+2.43.0
+

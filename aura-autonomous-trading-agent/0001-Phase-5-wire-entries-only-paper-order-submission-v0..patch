@@ -1,0 +1,822 @@
+From 5e1649111f96a3f0fde4c6454ec019f4c172f099 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 4 Sep 2026 19:29:40 +0000
+Subject: [PATCH] Phase 5: wire entries-only paper order submission (v0.5.3.26)
+
+Adds the missing piece that turns .23's execution specifications into
+actual (or validate-only) Alpaca paper orders, and wires the whole
+entries tail into the runtime supervisor. Scope and defaults confirmed
+with Martin before building:
+
+- ENTRIES ONLY. No closing/exit order path -- .24's (Phase 3) EXIT
+  decisions are not wired to anything here. That stays out of scope
+  until asked for.
+- .23's VALIDATED_LONG_ENTRY_REGIME_LABELS / VALIDATED_SHORT_ENTRY_
+  REGIME_LABELS allowlists are left untouched (still empty) -- Martin
+  explicitly deferred that decision, so every symbol still fails closed
+  with NO_VALIDATED_EXECUTION_DIRECTION for now. This module only
+  relays whatever .23 already decided; it can't grant a direction .23
+  didn't already validate.
+- OFF BY DEFAULT. Real submission needs --submit-paper on the new
+  aura_v05326_paper_order_submission.py glue AND .22's own independent
+  AURA_ALPACA_PAPER_ORDERS_ENABLED=true -- two explicit switches,
+  neither sufficient alone. Without --submit-paper, every ready symbol
+  is still built and still sent through .22, but only ever reaches
+  VALIDATED_NO_SUBMISSION, and needs no Alpaca credentials for that path.
+
+- aura_v05326_paper_order_submission.py: the actual glue. .23 produces
+  one multi-symbol execution_specification.json; .22 accepts exactly one
+  spec per invocation. This module extracts every EXECUTION_SPEC_READY
+  symbol and calls .22 (unmodified, as a subprocess) once per symbol,
+  never touching BLOCKED symbols, never inventing a result when the
+  adapter process itself fails (ADAPTER_FAILED, with stderr attached).
+  11 new tests, all against the real .22 script in its validate-only
+  mode (no credentials needed/used).
+
+- aura_v05321_alpaca_paper_runtime.py: additive wiring only -- the
+  existing .12-.19 cycle is untouched. Appends .25 (position sizing) ->
+  .23 (execution spec) -> .26 (this module) after .19 every cycle, and
+  adds a new --submit-paper flag (default off) forwarded only to .26.
+  Docstring updated to describe the new conditional capability honestly
+  rather than leave the old "never places an order" claim stale.
+  6 new static contract checks added to the existing runtime validator
+  (all passing); full suite at 163/163 (excluding the 2 pre-existing
+  tests that require live Alpaca credentials, unrelated to this change).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05321_alpaca_paper_runtime.py           |  85 +++-
+ aura_v05326_paper_order_submission.py         | 380 ++++++++++++++++++
+ ...aura_v05321_runtime_contract_validation.py |   6 +
+ ...test_aura_v05326_paper_order_submission.py | 207 ++++++++++
+ 4 files changed, 663 insertions(+), 15 deletions(-)
+ create mode 100644 aura_v05326_paper_order_submission.py
+ create mode 100644 tests/test_aura_v05326_paper_order_submission.py
+
+diff --git a/aura_v05321_alpaca_paper_runtime.py b/aura_v05321_alpaca_paper_runtime.py
+index 020ba71..e9edc42 100644
+--- a/aura_v05321_alpaca_paper_runtime.py
++++ b/aura_v05321_alpaca_paper_runtime.py
+@@ -2,14 +2,31 @@
+ """AURA v0.5.3.21 — controlled Alpaca paper runtime supervisor.
+ 
+ This supervisor runs the validated chain against CLOSED Alpaca market data:
+-.21 data -> .12 -> .13 -> .14 -> .15 -> .16 -> .17 -> .20 -> .18 -> .19.
+-
+-Important: v0.5.3.16-.19 are intentionally non-authorizing contracts. The
+-runtime therefore does NOT place Alpaca orders. v0.5.3.20 supplies deterministic
+-simulation evidence so the reconciliation and kill-switch path can be exercised
+-without inventing execution. A future Alpaca paper-order adapter must consume
+-a complete execution specification (side/quantity/order type) produced by the
+-risk-authorized chain; this supervisor must never invent those fields.
++.21 data -> .12 -> .13 -> .14 -> .15 -> .16 -> .17 -> .20 -> .18 -> .19
++-> .25 (position sizing) -> .23 (execution specification) -> .26 (paper
++order submission glue, ENTRIES ONLY).
++
++Important: v0.5.3.16-.19 are intentionally non-authorizing contracts, and
++the .25/.23/.26 tail added for Phase 5 does not change that -- .23's own
++VALIDATED_LONG_ENTRY_REGIME_LABELS / VALIDATED_SHORT_ENTRY_REGIME_LABELS
++remain whatever .23 itself has them set to (empty as of this change), so
++every cycle still reports NO_VALIDATED_EXECUTION_DIRECTION for every
++symbol until that's a separate, deliberate, reviewed decision. Even once
++populated, this runtime NEVER actually submits a paper order unless BOTH:
++    1. this runtime is invoked with --submit-paper (off by default), AND
++    2. AURA_ALPACA_PAPER_ORDERS_ENABLED=true is set in the environment
++       (.26's own, independent gate on top of .22's own identical gate).
++Without --submit-paper, .25/.23/.26 still run every cycle -- so you can
++see exactly what WOULD be sized/built/attempted -- but .26 only ever
++reaches VALIDATED_NO_SUBMISSION, and no Alpaca order-submission
++credentials are required for that path. .20 supplies deterministic
++simulation evidence so the reconciliation and kill-switch path (.18/.19)
++can be exercised without inventing execution; that is unrelated to and
++unaffected by the .25/.23/.26 entries tail.
++
++Exits are OUT OF SCOPE for this runtime: .24 (Phase 3's exit-policy
++tracker) is not wired in here, and .26 never builds or submits a closing
++order for an existing position.
+ 
+ Use --once for a single cycle. Use --loop-seconds for controlled recurring
+ paper validation. Ctrl+C stops the loop. Every cycle is archived under
+@@ -46,7 +63,7 @@ def write_state(payload: dict) -> None:
+     STATE.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+ 
+ 
+-def cycle() -> int:
++def cycle(submit_paper: bool = False) -> int:
+     ts = datetime.now(timezone.utc)
+     cycle_id = ts.strftime("%Y%m%dT%H%M%SZ")
+     cycle_dir = OUT / "cycles" / cycle_id
+@@ -54,7 +71,8 @@ def cycle() -> int:
+ 
+     state = {"runtime_version": "AURA v0.5.3.21", "cycle_id": cycle_id,
+              "started_at": ts.isoformat(), "mode": "ALPACA_PAPER_DATA_PLUS_LOCAL_SIMULATION",
+-             "exchange": "ALPACA", "live_execution": False, "status": "RUNNING"}
++             "exchange": "ALPACA", "live_execution": False, "submit_paper_requested": submit_paper,
++             "status": "RUNNING"}
+     write_state(state)
+ 
+     try:
+@@ -72,6 +90,10 @@ def cycle() -> int:
+             "20": cycle_dir / "observed_execution.json",
+             "18": cycle_dir / "reconciliation.json",
+             "19": cycle_dir / "execution_safety.json",
++            "25": cycle_dir / "position_sizing.json",
++            "25_sizing_config": cycle_dir / "sizing_config.json",
++            "23": cycle_dir / "execution_specification.json",
++            "26": cycle_dir / "paper_order_submission.json",
+         }
+         run([sys.executable, str(ROOT / "aura_v05312_market_state_engine.py"), "--input", str(DATA), "--output", str(outputs["12"])])
+         run([sys.executable, str(ROOT / "aura_v05313_signal_decision_engine.py"), "--input", str(outputs["12"]), "--output", str(outputs["13"])])
+@@ -86,18 +108,45 @@ def cycle() -> int:
+         run([sys.executable, str(ROOT / "aura_v05318_reconciliation.py"), "--ledger-input", str(outputs["17"]), "--observed-input", str(outputs["20"]), "--output", str(outputs["18"])])
+         run([sys.executable, str(ROOT / "aura_v05319_execution_safety.py"), "--input", str(outputs["18"]), "--output", str(outputs["19"])])
+ 
++        # --- Phase 5 tail: sizing -> execution spec -> submission glue. ---
++        # Runs every cycle regardless of --submit-paper, so what WOULD be
++        # sized/built/attempted is always visible. Only .26's own
++        # --submit-paper (forwarded here) can ever lead to a real order,
++        # and only if AURA_ALPACA_PAPER_ORDERS_ENABLED=true is also set --
++        # .26/.22's own independent env-var gate is untouched by this flag.
++        run([sys.executable, str(ROOT / "aura_v05325_position_sizing.py"),
++             "--bars-input", str(DATA), "--output", str(outputs["25"]),
++             "--sizing-config-output", str(outputs["25_sizing_config"])])
++        run([sys.executable, str(ROOT / "aura_v05323_execution_specification_builder.py"),
++             "--signal-input", str(outputs["13"]), "--safety-input", str(outputs["19"]),
++             "--sizing-config", str(outputs["25_sizing_config"]), "--output", str(outputs["23"])])
++        submission_cmd = [sys.executable, str(ROOT / "aura_v05326_paper_order_submission.py"),
++                           "--execution-spec-input", str(outputs["23"]), "--output", str(outputs["26"]),
++                           "--work-dir", str(cycle_dir / "paper_order_submission_work")]
++        if submit_paper:
++            submission_cmd.append("--submit-paper")
++        run(submission_cmd)
++
+         final = json.loads(outputs["19"].read_text(encoding="utf-8"))
++        submission = json.loads(outputs["26"].read_text(encoding="utf-8"))
+         state.update({"status": "PASS", "completed_at": datetime.now(timezone.utc).isoformat(),
+                       "execution_authorized": final.get("execution_authorized", False),
+                       "paper_execution_authorized": final.get("paper_execution_authorized", False),
+                       "live_execution_authorized": final.get("live_execution_authorized", False),
+                       "kill_switch_active": final.get("kill_switch_active", True),
++                      "ready_symbol_count": submission.get("ready_symbol_count", 0),
++                      "submitted_count": submission.get("submitted_count", 0),
++                      "validated_only_count": submission.get("validated_only_count", 0),
+                       "cycle_directory": str(cycle_dir)})
+         write_state(state)
+         print("\nAURA v0.5.3.21 CYCLE: PASS")
+         print("ALPACA MARKET DATA: INGESTED")
+-        print("PAPER EXECUTION: SIMULATED ONLY")
+-        print("ALPACA PAPER ORDERS: NOT SUBMITTED")
++        print("PAPER EXECUTION (.16 chain): SIMULATED ONLY")
++        print(f"ENTRIES READY / SUBMITTED / VALIDATED-ONLY: "
++              f"{submission.get('ready_symbol_count', 0)} / "
++              f"{submission.get('submitted_count', 0)} / "
++              f"{submission.get('validated_only_count', 0)}")
++        print(f"SUBMIT-PAPER REQUESTED: {submit_paper}")
+         print("LIVE EXECUTION: FALSE")
+         print(f"CYCLE: {cycle_dir}")
+         return 0
+@@ -116,15 +165,21 @@ def main() -> int:
+     p.add_argument("--once", action="store_true")
+     p.add_argument("--loop-seconds", type=int, default=0,
+                    help="Recurring interval; 0 means one cycle. Minimum 60 seconds.")
++    p.add_argument("--submit-paper", action="store_true",
++                   help="Forward --submit-paper to .26 each cycle. Still requires "
++                        "AURA_ALPACA_PAPER_ORDERS_ENABLED=true (.26/.22's own "
++                        "independent gate) before any order is actually submitted. "
++                        "Off by default: without this flag, entries are sized and "
++                        "built every cycle but only ever reach VALIDATED_NO_SUBMISSION.")
+     args = p.parse_args()
+     if args.loop_seconds and args.loop_seconds < 60:
+         p.error("--loop-seconds must be >= 60")
+     if args.once:
+-        return cycle()
++        return cycle(args.submit_paper)
+     if not args.loop_seconds:
+-        return cycle()
++        return cycle(args.submit_paper)
+     while True:
+-        rc = cycle()
++        rc = cycle(args.submit_paper)
+         if rc != 0:
+             return rc
+         time.sleep(args.loop_seconds)
+diff --git a/aura_v05326_paper_order_submission.py b/aura_v05326_paper_order_submission.py
+new file mode 100644
+index 0000000..4eed314
+--- /dev/null
++++ b/aura_v05326_paper_order_submission.py
+@@ -0,0 +1,380 @@
++#!/usr/bin/env python3
++"""
++AURA v0.5.3.26 — Paper Order Submission Glue (Phase 5, entries only)
++
++Purpose
++--------
++v0.5.3.23 (Execution Specification Builder) produces one fully-formed,
++per-symbol execution specification for every symbol it judges
++EXECUTION_SPEC_READY. v0.5.3.22 (the isolated Alpaca PAPER execution
++adapter) accepts exactly ONE such specification per invocation and,
++depending on --submit-paper and the AURA_ALPACA_PAPER_ORDERS_ENABLED
++environment variable, either validates it only or actually submits it to
++Alpaca's paper endpoint. Nothing before this module turns .23's
++multi-symbol output into the one-call-per-symbol shape .22 expects. This
++module is that glue -- nothing more.
++
++Scope (Martin's explicit choice, confirmed before building)
++-------------------------------------------------------------
++- ENTRIES ONLY. This module never looks at v0.5.3.24's (Phase 3) exit
++  decisions and never builds or submits a closing/SELL order for an
++  existing position. That remains out of scope until Martin asks for it.
++- v0.5.3.23's VALIDATED_LONG_ENTRY_REGIME_LABELS /
++  VALIDATED_SHORT_ENTRY_REGIME_LABELS allowlists are UNTOUCHED by this
++  module and remain whatever v0.5.3.23 itself has them set to (empty by
++  default, as of this module's introduction). This module will forward
++  whatever .23 already decided; it does not, and cannot, grant a symbol
++  a direction .23 didn't already validate.
++- OFF BY DEFAULT. Real submission requires --submit-paper on THIS
++  module (explicit, not inherited from any config), which is forwarded
++  to v0.5.3.22 for that call only. v0.5.3.22's own independent gate
++  (AURA_ALPACA_PAPER_ORDERS_ENABLED=true) still applies unchanged on top
++  of that -- two explicit, separate switches, neither one alone enough.
++  Without --submit-paper, every ready symbol is still built, still sent
++  through v0.5.3.22, but only ever reaches VALIDATED_NO_SUBMISSION --
++  nothing is submitted, and no Alpaca credentials are even required for
++  that path (v0.5.3.22 itself never touches the network in validate-only
++  mode).
++
++This layer deliberately does NOT:
++- decide direction, risk, or quantity -- those remain entirely
++  v0.5.3.13/.14/.19/.23's job; this module only relays what .23 already
++  decided was EXECUTION_SPEC_READY;
++- reimplement v0.5.3.22's own validation, idempotency, or submission
++  logic -- it is invoked as a subprocess, unmodified, exactly as the
++  runtime supervisor already invokes every other numbered stage;
++- retry a failed adapter call, suppress its error, or invent a result
++  when the adapter process itself fails to produce output -- that
++  symbol is reported ADAPTER_FAILED with the adapter's own stderr
++  attached, never silently dropped;
++- touch anything BLOCKED by .23 -- a symbol .23 didn't mark
++  EXECUTION_SPEC_READY is never submitted, never even built into a
++  request.
++
++Default input:
++    regime_output/execution_specification/execution_specification.json  (v0.5.3.23)
++
++Default output:
++    regime_output/paper_order_submission/paper_order_submission.json
++
++Per-symbol adapter input/output files are written under
++regime_output/paper_order_submission/work/<symbol>/, one pair per
++symbol, so every v0.5.3.22 invocation and its raw response stays on disk
++for audit.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import sys
++import subprocess
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parent
++
++VERSION = "AURA v0.5.3.26"
++EXPECTED_EXEC_SPEC_VERSION = "AURA v0.5.3.23"
++EXPECTED_EXEC_SPEC_ENGINE = "EXECUTION_SPECIFICATION_BUILDER"
++
++DEFAULT_EXECUTION_SPEC_INPUT = Path(
++    r"regime_output\execution_specification\execution_specification.json"
++)
++DEFAULT_OUTPUT = Path(
++    r"regime_output\paper_order_submission\paper_order_submission.json"
++)
++DEFAULT_WORK_DIR = Path(r"regime_output\paper_order_submission\work")
++DEFAULT_ADAPTER_SCRIPT = ROOT / "aura_v05322_alpaca_paper_execution_adapter.py"
++
++
++def stable_json(obj: Any) -> str:
++    return json.dumps(
++        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
++    )
++
++
++def sha256_text(text: str) -> str:
++    return hashlib.sha256(text.encode("utf-8")).hexdigest()
++
++
++def load_json(path: Path) -> dict[str, Any]:
++    if not path.exists():
++        raise FileNotFoundError(f"Input file not found: {path}")
++    with path.open("r", encoding="utf-8") as f:
++        payload = json.load(f)
++    if not isinstance(payload, dict):
++        raise ValueError("Input JSON must contain an object at the top level.")
++    return payload
++
++
++def ready_specs(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
++    """Extracts {symbol: execution_specification} for every symbol
++    v0.5.3.23 marked EXECUTION_SPEC_READY. Everything else (BLOCKED,
++    missing, malformed) is excluded -- never guessed at, never
++    submitted."""
++    decisions = payload.get("decisions")
++    if not isinstance(decisions, dict):
++        return {}
++
++    result: dict[str, dict[str, Any]] = {}
++    for symbol, item in decisions.items():
++        if not isinstance(item, dict):
++            continue
++        if item.get("status") != "EXECUTION_SPEC_READY":
++            continue
++        spec = item.get("execution_specification")
++        if isinstance(spec, dict):
++            result[symbol] = spec
++    return result
++
++
++def symbol_work_key(symbol: str) -> str:
++    """Filesystem-safe key for a symbol like 'BTC/USD' -> 'BTC_USD'."""
++    return symbol.replace("/", "_")
++
++
++def submit_one(
++    adapter_script: Path,
++    spec: dict[str, Any],
++    work_dir: Path,
++    symbol: str,
++    submit_paper: bool,
++) -> dict[str, Any]:
++    """The only function here that shells out. Invokes v0.5.3.22
++    unmodified, one symbol per call. Real Alpaca submission additionally
++    requires v0.5.3.22's own AURA_ALPACA_PAPER_ORDERS_ENABLED gate --
++    submit_paper alone is not enough, by design."""
++    key = symbol_work_key(symbol)
++    symbol_dir = work_dir / key
++    symbol_dir.mkdir(parents=True, exist_ok=True)
++    input_path = symbol_dir / "spec.json"
++    output_path = symbol_dir / "result.json"
++    input_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
++
++    cmd = [
++        sys.executable, str(adapter_script),
++        "--input", str(input_path),
++        "--output", str(output_path),
++    ]
++    if submit_paper:
++        cmd.append("--submit-paper")
++
++    proc = subprocess.run(cmd, capture_output=True, text=True)
++
++    if output_path.exists():
++        try:
++            return json.loads(output_path.read_text(encoding="utf-8"))
++        except (json.JSONDecodeError, OSError) as exc:
++            return {
++                "adapter_version": None,
++                "status": "ADAPTER_OUTPUT_UNREADABLE",
++                "symbol": symbol,
++                "returncode": proc.returncode,
++                "error": f"{type(exc).__name__}: {exc}",
++                "stderr": proc.stderr[-2000:],
++            }
++
++    return {
++        "adapter_version": None,
++        "status": "ADAPTER_FAILED",
++        "symbol": symbol,
++        "returncode": proc.returncode,
++        "stderr": proc.stderr[-2000:],
++    }
++
++
++def base_result(execution_spec_path: Path, submit_paper: bool) -> dict[str, Any]:
++    return {
++        "agent_version": VERSION,
++        "engine": "PAPER_ORDER_SUBMISSION",
++        "decision_status": "BLOCKED",
++        "generated_from_execution_specification": str(execution_spec_path.resolve()),
++        "submit_paper_requested": submit_paper,
++        "ready_symbol_count": 0,
++        "submitted_count": 0,
++        "validated_only_count": 0,
++        "failed_count": 0,
++        "results": {},
++        "blocked_reasons": [],
++        "state_hash": None,
++        "state_id": None,
++        "guardrails": {
++            "scope": "ENTRIES_ONLY",
++            "exit_orders_submitted": False,
++            "direction_decided_here": False,
++            "risk_decided_here": False,
++            "quantity_decided_here": False,
++            "adapter_reimplemented": False,
++            "adapter_version_required": "AURA v0.5.3.22",
++            "submit_paper_forwarded": submit_paper,
++            "submission_requires_adapter_env_gate": True,
++            "live_execution": False,
++            "fail_closed": True,
++        },
++    }
++
++
++def finalize(result: dict[str, Any]) -> dict[str, Any]:
++    canonical = {
++        "agent_version": result["agent_version"],
++        "engine": result["engine"],
++        "decision_status": result["decision_status"],
++        "submit_paper_requested": result["submit_paper_requested"],
++        "results": result["results"],
++        "blocked_reasons": result["blocked_reasons"],
++    }
++    result["state_hash"] = sha256_text(stable_json(canonical))
++    result["state_id"] = f"POS-{result['state_hash'][:24]}"
++    return result
++
++
++def build_and_submit(
++    execution_spec: dict[str, Any],
++    execution_spec_path: Path,
++    adapter_script: Path,
++    work_dir: Path,
++    submit_paper: bool,
++) -> dict[str, Any]:
++    result = base_result(execution_spec_path, submit_paper)
++
++    specs = ready_specs(execution_spec)
++    result["ready_symbol_count"] = len(specs)
++
++    if not specs:
++        result["decision_status"] = "DECIDED"
++        result["blocked_reasons"] = []
++        return finalize(result)
++
++    result["decision_status"] = "DECIDED"
++    submitted = validated_only = failed = 0
++
++    for symbol in sorted(specs):
++        spec = specs[symbol]
++        outcome = submit_one(adapter_script, spec, work_dir, symbol, submit_paper)
++        result["results"][symbol] = outcome
++        status = outcome.get("status")
++        if status in {"SUBMITTED", "ALREADY_EXISTS"}:
++            submitted += 1
++        elif status == "VALIDATED_NO_SUBMISSION":
++            validated_only += 1
++        else:
++            failed += 1
++
++    result["submitted_count"] = submitted
++    result["validated_only_count"] = validated_only
++    result["failed_count"] = failed
++
++    return finalize(result)
++
++
++def write_json(path: Path, payload: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w", encoding="utf-8") as f:
++        json.dump(payload, f, indent=2, ensure_ascii=False, allow_nan=False)
++        f.write("\n")
++
++
++def print_report(result: dict[str, Any], output_path: Path) -> None:
++    print("=" * 96)
++    print(f"{VERSION} — PAPER ORDER SUBMISSION (Phase 5, entries only)")
++    print("=" * 96)
++    print()
++    print(f"SUBMIT-PAPER REQUESTED : {result['submit_paper_requested']}")
++    print("ADAPTER ENV GATE       : AURA_ALPACA_PAPER_ORDERS_ENABLED (independent, unchanged)")
++    print("EXIT ORDERS            : OUT OF SCOPE (entries only)")
++    print("LIVE EXECUTION         : DISABLED")
++    print()
++    print("SUMMARY")
++    print("-" * 96)
++    print(f"STATUS                 : {result['decision_status']}")
++    print(f"READY SYMBOLS          : {result['ready_symbol_count']}")
++    print(f"SUBMITTED              : {result['submitted_count']}")
++    print(f"VALIDATED ONLY         : {result['validated_only_count']}")
++    print(f"FAILED                 : {result['failed_count']}")
++    print(f"STATE ID               : {result['state_id']}")
++    print()
++
++    for symbol, outcome in sorted(result["results"].items()):
++        print(symbol)
++        print(f"  STATUS             : {outcome.get('status')}")
++        if outcome.get("broker_order_id"):
++            print(f"  BROKER ORDER ID    : {outcome.get('broker_order_id')}")
++        if outcome.get("client_order_id"):
++            print(f"  CLIENT ORDER ID    : {outcome.get('client_order_id')}")
++        if outcome.get("stderr"):
++            print(f"  STDERR (tail)      : {outcome['stderr'][-300:]}")
++        print()
++
++    if result["blocked_reasons"]:
++        print("FAIL-CLOSED REASONS")
++        print("-" * 96)
++        for reason in result["blocked_reasons"]:
++            print(f"  - {reason}")
++        print()
++
++    print(f"OUTPUT                 : {output_path.resolve()}")
++    print("=" * 96)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--execution-spec-input", type=Path, default=DEFAULT_EXECUTION_SPEC_INPUT
++    )
++    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
++    parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
++    parser.add_argument("--adapter-script", type=Path, default=DEFAULT_ADAPTER_SCRIPT)
++    parser.add_argument(
++        "--submit-paper",
++        action="store_true",
++        help=(
++            "Forward --submit-paper to v0.5.3.22 for each ready symbol. "
++            "v0.5.3.22's own AURA_ALPACA_PAPER_ORDERS_ENABLED=true env var "
++            "is STILL required on top of this -- omit either one and every "
++            "symbol stays VALIDATED_NO_SUBMISSION."
++        ),
++    )
++    args = parser.parse_args()
++
++    try:
++        execution_spec = load_json(args.execution_spec_input)
++        result = build_and_submit(
++            execution_spec,
++            args.execution_spec_input,
++            args.adapter_script,
++            args.work_dir,
++            args.submit_paper,
++        )
++        write_json(args.output, result)
++        print_report(result, args.output)
++        return 0
++
++    except FileNotFoundError as exc:
++        result = base_result(args.execution_spec_input, args.submit_paper)
++        result["blocked_reasons"] = [f"MISSING_INPUT_SOURCE:{exc}"]
++        result = finalize(result)
++        try:
++            write_json(args.output, result)
++            print_report(result, args.output)
++        except Exception:
++            pass
++        print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
++        return 1
++
++    except Exception as exc:
++        result = base_result(args.execution_spec_input, args.submit_paper)
++        result["blocked_reasons"] = [f"UNEXPECTED_ENGINE_ERROR:{type(exc).__name__}"]
++        result = finalize(result)
++        try:
++            write_json(args.output, result)
++            print_report(result, args.output)
++        except Exception:
++            pass
++        print(f"FAIL-CLOSED ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/aura_v05321_runtime_contract_validation.py b/tests/aura_v05321_runtime_contract_validation.py
+index c6e1efc..3bcfab9 100644
+--- a/tests/aura_v05321_runtime_contract_validation.py
++++ b/tests/aura_v05321_runtime_contract_validation.py
+@@ -19,6 +19,12 @@ checks = [
+     ("data adapter excludes current hour", 'df["timestamp"] < end' in DATA),
+     ("data adapter enforces exact per-symbol bar count", "final bar count mismatch" in DATA),
+     ("data adapter never submits orders", "never submits an order" in DATA),
++    ("runtime includes .25 position sizing", "aura_v05325_position_sizing.py" in RUNTIME),
++    ("runtime includes .23 execution specification", "aura_v05323_execution_specification_builder.py" in RUNTIME),
++    ("runtime includes .26 paper order submission glue", "aura_v05326_paper_order_submission.py" in RUNTIME),
++    ("runtime exposes --submit-paper, off by default (store_true)", 'p.add_argument("--submit-paper", action="store_true"' in RUNTIME),
++    ("runtime forwards --submit-paper only when requested", "if submit_paper:" in RUNTIME),
++    ("runtime still hard-blocks live execution after Phase 5 tail", '"live_execution": False' in RUNTIME),
+ ]
+ 
+ failed = 0
+diff --git a/tests/test_aura_v05326_paper_order_submission.py b/tests/test_aura_v05326_paper_order_submission.py
+new file mode 100644
+index 0000000..14780b9
+--- /dev/null
++++ b/tests/test_aura_v05326_paper_order_submission.py
+@@ -0,0 +1,207 @@
++"""
++Tests for aura_v05326_paper_order_submission.py (Phase 5, entries only:
++glue between v0.5.3.23's multi-symbol execution_specification.json and
++v0.5.3.22's one-symbol-per-call adapter).
++
++submit_one() invokes the REAL v0.5.3.22 script as a subprocess in its
++default validate-only mode (no --submit-paper), which needs no Alpaca
++credentials and never touches the network -- so these are genuine
++integration tests, not mocks, without requiring live credentials.
++"""
++from __future__ import annotations
++
++import importlib.util
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++SCRIPT_PATH = ROOT / "aura_v05326_paper_order_submission.py"
++ADAPTER_SCRIPT = ROOT / "aura_v05322_alpaca_paper_execution_adapter.py"
++
++spec = importlib.util.spec_from_file_location("aura_v05326_paper_order_submission", SCRIPT_PATH)
++pos = importlib.util.module_from_spec(spec)
++sys.modules["aura_v05326_paper_order_submission"] = pos
++spec.loader.exec_module(pos)  # type: ignore[union-attr]
++
++
++def valid_execution_spec(symbol: str = "BTC/USD", client_order_id: str = "test-coid-1") -> dict:
++    return {
++        "execution_spec_version": "1.0",
++        "exchange": "ALPACA",
++        "account_mode": "PAPER",
++        "live_execution": False,
++        "kill_switch": False,
++        "execution_authorized": True,
++        "paper_execution_authorized": True,
++        "symbol": symbol,
++        "side": "BUY",
++        "quantity": "0.01",
++        "order_type": "MARKET",
++        "time_in_force": "GTC",
++        "client_order_id": client_order_id,
++    }
++
++
++def ready_decision(symbol: str) -> dict:
++    return {
++        "symbol": symbol,
++        "status": "EXECUTION_SPEC_READY",
++        "reason": "VALIDATED_DIRECTION_AND_QUANTITY_PRESENT",
++        "regime_state": "BEAR x LOW ATR x POSITIVE bar-2",
++        "execution_specification": valid_execution_spec(symbol, client_order_id=f"coid-{symbol.replace('/', '-')}"),
++    }
++
++
++def blocked_decision(symbol: str, reason: str = "NO_VALIDATED_EXECUTION_DIRECTION") -> dict:
++    return {"symbol": symbol, "status": "BLOCKED", "reason": reason}
++
++
++def exec_spec_payload(decisions: dict) -> dict:
++    return {
++        "agent_version": pos.EXPECTED_EXEC_SPEC_VERSION,
++        "engine": pos.EXPECTED_EXEC_SPEC_ENGINE,
++        "decision_status": "DECIDED",
++        "decisions": decisions,
++        "blocked_reasons": [],
++    }
++
++
++# --------------------------------------------------------------------------
++# ready_specs
++# --------------------------------------------------------------------------
++
++def test_ready_specs_includes_only_execution_spec_ready():
++    payload = exec_spec_payload({
++        "BTC/USD": ready_decision("BTC/USD"),
++        "ETH/USD": blocked_decision("ETH/USD"),
++    })
++    specs = pos.ready_specs(payload)
++    assert set(specs.keys()) == {"BTC/USD"}
++    assert specs["BTC/USD"]["symbol"] == "BTC/USD"
++
++
++def test_ready_specs_excludes_malformed_execution_specification():
++    bad = ready_decision("BTC/USD")
++    bad["execution_specification"] = "not-a-dict"
++    payload = exec_spec_payload({"BTC/USD": bad})
++    assert pos.ready_specs(payload) == {}
++
++
++def test_ready_specs_empty_when_no_decisions():
++    assert pos.ready_specs({}) == {}
++    assert pos.ready_specs({"decisions": "not-a-dict"}) == {}
++
++
++# --------------------------------------------------------------------------
++# submit_one -- real subprocess call to the actual v0.5.3.22 adapter,
++# always in validate-only mode (no credentials needed/used).
++# --------------------------------------------------------------------------
++
++def test_submit_one_validates_without_submitting(tmp_path: Path):
++    outcome = pos.submit_one(ADAPTER_SCRIPT, valid_execution_spec(), tmp_path, "BTC/USD", submit_paper=False)
++    assert outcome["status"] == "VALIDATED_NO_SUBMISSION"
++    assert outcome["symbol"] == "BTC/USD"
++    assert outcome["side"] == "BUY"
++
++
++def test_submit_one_reports_adapter_failure_for_bad_script_path(tmp_path: Path):
++    outcome = pos.submit_one(tmp_path / "does_not_exist.py", valid_execution_spec(), tmp_path, "BTC/USD", submit_paper=False)
++    assert outcome["status"] == "ADAPTER_FAILED"
++    assert outcome["returncode"] != 0
++
++
++def test_submit_one_writes_spec_and_result_files_under_symbol_dir(tmp_path: Path):
++    pos.submit_one(ADAPTER_SCRIPT, valid_execution_spec(), tmp_path, "BTC/USD", submit_paper=False)
++    symbol_dir = tmp_path / "BTC_USD"
++    assert (symbol_dir / "spec.json").exists()
++    assert (symbol_dir / "result.json").exists()
++
++
++# --------------------------------------------------------------------------
++# build_and_submit -- end-to-end against the real adapter, validate-only.
++# --------------------------------------------------------------------------
++
++def test_build_and_submit_processes_only_ready_symbols(tmp_path: Path):
++    payload = exec_spec_payload({
++        "BTC/USD": ready_decision("BTC/USD"),
++        "ETH/USD": blocked_decision("ETH/USD"),
++    })
++    result = pos.build_and_submit(
++        payload, Path("exec_spec.json"), ADAPTER_SCRIPT, tmp_path, submit_paper=False,
++    )
++    assert result["decision_status"] == "DECIDED"
++    assert result["ready_symbol_count"] == 1
++    assert set(result["results"].keys()) == {"BTC/USD"}
++    assert result["results"]["BTC/USD"]["status"] == "VALIDATED_NO_SUBMISSION"
++    assert result["validated_only_count"] == 1
++    assert result["submitted_count"] == 0
++
++
++def test_build_and_submit_no_ready_symbols_is_decided_not_blocked(tmp_path: Path):
++    payload = exec_spec_payload({"BTC/USD": blocked_decision("BTC/USD")})
++    result = pos.build_and_submit(
++        payload, Path("exec_spec.json"), ADAPTER_SCRIPT, tmp_path, submit_paper=False,
++    )
++    assert result["decision_status"] == "DECIDED"
++    assert result["ready_symbol_count"] == 0
++    assert result["results"] == {}
++
++
++def test_build_and_submit_guardrails_reflect_submit_paper_flag(tmp_path: Path):
++    payload = exec_spec_payload({})
++    result_off = pos.build_and_submit(payload, Path("x.json"), ADAPTER_SCRIPT, tmp_path, submit_paper=False)
++    result_on = pos.build_and_submit(payload, Path("x.json"), ADAPTER_SCRIPT, tmp_path, submit_paper=True)
++    assert result_off["guardrails"]["submit_paper_forwarded"] is False
++    assert result_on["guardrails"]["submit_paper_forwarded"] is True
++    assert result_off["guardrails"]["exit_orders_submitted"] is False
++    assert result_on["guardrails"]["exit_orders_submitted"] is False
++
++
++# --------------------------------------------------------------------------
++# CLI smoke test -- always validate-only (no --submit-paper), so no
++# credentials are needed.
++# --------------------------------------------------------------------------
++
++def test_cli_runs_end_to_end_validate_only(tmp_path: Path):
++    payload = exec_spec_payload({"BTC/USD": ready_decision("BTC/USD")})
++    spec_path = tmp_path / "execution_specification.json"
++    spec_path.write_text(json.dumps(payload), encoding="utf-8")
++
++    output_path = tmp_path / "out.json"
++    work_dir = tmp_path / "work"
++
++    proc = subprocess.run(
++        [
++            sys.executable, str(SCRIPT_PATH),
++            "--execution-spec-input", str(spec_path),
++            "--output", str(output_path),
++            "--work-dir", str(work_dir),
++        ],
++        cwd=ROOT, capture_output=True, text=True,
++    )
++    assert proc.returncode == 0, proc.stderr
++    result = json.loads(output_path.read_text(encoding="utf-8"))
++    assert result["decision_status"] == "DECIDED"
++    assert result["submit_paper_requested"] is False
++    assert result["results"]["BTC/USD"]["status"] == "VALIDATED_NO_SUBMISSION"
++
++
++def test_cli_fails_closed_on_missing_execution_spec(tmp_path: Path):
++    output_path = tmp_path / "out.json"
++    proc = subprocess.run(
++        [
++            sys.executable, str(SCRIPT_PATH),
++            "--execution-spec-input", str(tmp_path / "does_not_exist.json"),
++            "--output", str(output_path),
++            "--work-dir", str(tmp_path / "work"),
++        ],
++        cwd=ROOT, capture_output=True, text=True,
++    )
++    assert proc.returncode == 1
++    result = json.loads(output_path.read_text(encoding="utf-8"))
++    assert result["decision_status"] == "BLOCKED"
++    assert result["blocked_reasons"]
+-- 
+2.43.0
+

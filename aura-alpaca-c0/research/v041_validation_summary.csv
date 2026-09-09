@@ -1,0 +1,2 @@
+selected_filter,train_signals,train_5d_mean,train_5d_median,train_positive_rate,test_signals,test_5d_mean,test_5d_median,test_positive_rate,raw_train_5d_median,raw_test_5d_median,test_median_lift_vs_raw,test_positive_rate_lift_vs_raw,train_end,test_start
+TREND_STACK + MACD_HIST_GT_0 + PERSISTENCE_3,12,0.02598579418980564,0.019617401931579015,0.75,4,-0.0051811013976077736,0.002216946829402211,0.5,0.000161446146229427,-0.0008224654020230759,0.003039412231425287,0.015625,2026-06-30,2026-07-01

@@ -1,0 +1,75 @@
+// ============================================================
+// CONFIG -- Alpaca keys live here as plain values rather than an
+// n8n Credential, since the self-contained fetch pattern needs two
+// custom headers. These are PAPER TRADING keys.
+// ============================================================
+return [{
+  json: {
+    // Alpaca
+    alpacaKeyId: "PKDF3HTNHCLLZ62UFFVIPVWHYP",
+    alpacaSecretKey: "F85nV7Z3VBX638u51dp186zmhY3nFKH9oSp5cD4FtTzZ",
+    alpacaBaseUrl: "https://paper-api.alpaca.markets",
+    alpacaDataUrl: "https://data.alpaca.markets",
+
+    // Session window (Eastern Time)
+    sessionStartHourEt: 4,
+    sessionEndHourEt: 20,
+
+    // Screener
+    moverThresholdPct: 5,
+    maxFlaggedTickers: 20,
+    minQuoteVolumeUsd: 1000000,
+    maxSpreadPct: 1.0,
+    snapshotBatchSize: 100,
+
+    // Scoring
+    macdDeadzonePct: 0.05,
+    relVolumeMinHistoryDays: 5,
+
+    // Risk (ATR multipliers)
+    stopAtrMult: 1.5,
+    target1AtrMult: 2.5,
+    target2AtrMult: 4,
+
+    // Alert deduplication
+    alertCooldownMinutes: 45,
+
+    // AUTO-TRADING
+    autoTradingEnabled: true,
+    autoTradeMinScore: 5,
+
+    // MANUAL APPROVAL
+    requireApproval: true,
+    approvalTimeoutMinutes: 10,
+    maxPriceDriftPct: 1.0,
+
+    // RESEARCH NOTE
+    researchNoteEnabled: true,
+    researchModel: "claude-sonnet-5",
+
+    // ===== NEW RISK CONTROLS (v15) =====
+    fixedDollarPerTrade: 100,
+    maxConcurrentPositions: 4,
+    dailyLossCircuitBreakerPct: 2,
+    dailyLossLimitUsd: 150,            // absolute $ limit (in addition to %)
+    maxConsecutiveLosses: 3,
+    pdtMaxDayTrades: 3,
+    microTestMode: true,               // forces $25 size while testing
+    tieredSizingEnabled: true,
+    tierStrongScore: 7,
+    tierStrongUsd: 200,
+    tierMediumUsd: 100,
+
+    // Telegram
+    telegramChatId: "1113277398",
+
+    // Email
+    emailFrom: "tempo130873@gmail.com",
+    emailTo: "martinpou@hotmail.com",
+
+    // Google Sheets
+    googleSheetsDocId: "1bpvUL5kOsqHrLqC8If9N9FvB0Q8TDlyQAoI-4-Rz5ug",
+    googleSheetsTabName: "StockAlerts",
+    stockTradesTabName: "StockTrades"
+  }
+}];

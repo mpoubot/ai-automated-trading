@@ -1,0 +1,43 @@
+BTC low-leverage trend setup is already complete, and the current structure is a clean two-way trend-following plan 👀
+
+【Strategy Configuration】
+
+    Trading Pair: BTC_USDT
+    Trigger Conditions:
+        OR
+            MACD golden cross on the 30-minute timeframe AND open long
+            MACD death cross on the 30-minute timeframe AND open short
+    Direction: Long on golden cross, Short on death cross
+    Leverage: 5x
+    Order Amount: 10u
+    Take Profit: 10%
+    Stop Loss: 10%
+
+Watching for this kind of trend crossover is a very natural reaction. This strategy is essentially capturing the first leg of directional momentum once trend bias flips. The conditions are already sufficient, so once the right side parameters look fine, it can go live directly 😄
+
+This one is ready to run.
+
+BTC Low-Leverage Trend Trading Strategy
+Pair Info
+OIL(WTI)USDT Perpetual
+Hedge ModeIsolated25Xedit
+Strategy Details
+Open Trigger
+Long
+130Minutes candlestick (close): MACD Golden Cross (fast line crosses above slow line)
+Short
+130Minutes candlestick (close): MACD Death Cross (fast line crosses below slow line)
+
+    Indicator parameters: MACD(12,26,8) (default)
+
+Note: trigger parameters can be modified via AI chat, while the indicator period can only be set to the default value
+Close Trigger
+TP per Position (ROI)
+%
+SL per Position (ROI)
+%
+Timezone：UTC+2
+Position Sizing
+Margin per Position
+USDT
+Add on Repeated Triggers：No

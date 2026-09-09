@@ -1,0 +1,535 @@
+From 0ab52488114341c67d89ffa107af281d60146e77 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 16:36:51 +0000
+Subject: [PATCH 05/10] .17 Decision/Execution Ledger: required-vs-optional
+ symbol handling for full coin universe
+
+Same pattern as .13-.16: REQUIRED_SYMBOLS (BTC/ETH) remain the only
+symbols whose structural invalidity can block the whole ledger decision.
+Every other symbol .16 reports -- including one .16 itself individually
+blocked -- gets its own ledger entry independently.
+
+Specific changes:
+- New ledger_entry_errors_for_symbol(symbol, item) helper factors out the
+  original per-symbol structural checks (valid execution_decision, intent
+  flag consistency, no fabricated fill price/timestamp, no position
+  claim). "BLOCKED" was already an accepted execution_decision value in
+  this check, so an optional symbol .16 individually blocked needs no
+  special-casing here.
+- verify_upstream()'s structural-validity loop scoped to REQUIRED_SYMBOLS
+  only; the intent-count used to cross-check .16's own
+  paper_execution_allowed / overall_execution_decision fields now spans
+  the FULL symbol set (required + optional), matching how .16 itself
+  already counts any symbol's intent toward those aggregate fields --
+  without this, a legitimate optional-symbol intent would look like an
+  upstream inconsistency and wrongly block everything.
+- build_ledger()'s main loop iterates every symbol .16 reported (union
+  with REQUIRED_SYMBOLS): required symbols keep the original recording
+  logic; optional symbols get the same plus a distinct
+  UPSTREAM_EXECUTION_BLOCKED reason when passing through a legitimate
+  upstream block, recorded in optional_symbols_blocked, without affecting
+  the required pair.
+- print_report() iterates actual decisions instead of a fixed BTC/ETH
+  tuple, labeling each symbol REQUIRED/OPTIONAL.
+
+Adds 9 contract tests, including the intent-count cross-check now
+spanning optional symbols and an optional-structural-inconsistency-
+blocks-only-that-symbol test. Full suite (60 tests) green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05317_decision_execution_ledger.py      | 169 ++++++++----
+ ...t_aura_v05317_decision_execution_ledger.py | 245 ++++++++++++++++++
+ 2 files changed, 370 insertions(+), 44 deletions(-)
+ create mode 100644 tests/test_aura_v05317_decision_execution_ledger.py
+
+diff --git a/aura_v05317_decision_execution_ledger.py b/aura_v05317_decision_execution_ledger.py
+index ab8f70f..d613261 100644
+--- a/aura_v05317_decision_execution_ledger.py
++++ b/aura_v05317_decision_execution_ledger.py
+@@ -51,6 +51,10 @@ DEFAULT_OUTPUT = Path(
+     r"regime_output\decision_execution_ledger\decision_execution_ledger.json"
+ )
+ SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
++# block the whole ledger decision if missing/structurally invalid. Kept as
++# a separate name (aliased to SYMBOLS) so the rest of this file reads
++# unambiguously -- mirrors the same alias in v0.5.3.13-.16.
+ 
+ 
+ def stable_json(obj: Any) -> str:
+@@ -133,6 +137,50 @@ def canonical_paper_execution_hash(payload: dict[str, Any]) -> str:
+     return sha256_text(stable_json(canonical))
+ 
+ 
++def ledger_entry_errors_for_symbol(symbol: str, item: Any) -> list[str]:
++    """
++    Structural validity check for a single symbol's v0.5.3.16 entry. No
++    execution is recalculated here. "BLOCKED" is already an accepted
++    execution_decision value -- both the required-symbol global-failure
++    path and an optional symbol individually blocked upstream use it.
++    """
++    if not isinstance(item, dict):
++        return [f"MISSING_OR_INVALID_SYMBOL:{symbol}"]
++
++    errors: list[str] = []
++    execution_decision = item.get("execution_decision")
++    intent = item.get("paper_order_intent")
++    position_exists = item.get("position_exists")
++    position_id = item.get("position_id")
++    fill_price = item.get("fill_price")
++    fill_timestamp = item.get("fill_timestamp")
++
++    if execution_decision not in {"NO_ORDER", "PAPER_ORDER_INTENT", "BLOCKED"}:
++        errors.append(f"INVALID_EXECUTION_DECISION:{symbol}:{execution_decision!r}")
++
++    if not isinstance(intent, bool):
++        errors.append(f"INVALID_PAPER_ORDER_INTENT:{symbol}")
++
++    if position_exists is not False:
++        errors.append(f"POSITION_CLAIM_NOT_FALSE:{symbol}")
++    if position_id is not None:
++        errors.append(f"POSITION_ID_PRESENT:{symbol}")
++
++    if intent is True:
++        if execution_decision != "PAPER_ORDER_INTENT":
++            errors.append(f"INTENT_DECISION_INCONSISTENT:{symbol}")
++        if item.get("paper_order_status") != "PENDING_EXECUTION":
++            errors.append(f"INTENT_STATUS_INVALID:{symbol}")
++        if fill_price is not None:
++            errors.append(f"FABRICATED_FILL_PRICE:{symbol}")
++        if fill_timestamp is not None:
++            errors.append(f"FABRICATED_FILL_TIMESTAMP:{symbol}")
++    elif execution_decision == "PAPER_ORDER_INTENT":
++        errors.append(f"INTENT_FALSE_FOR_INTENT_DECISION:{symbol}")
++
++    return errors
++
++
+ def verify_upstream(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+     errors: list[str] = []
+ 
+@@ -176,45 +224,24 @@ def verify_upstream(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+         errors.append("MISSING_UPSTREAM_DECISIONS")
+         return False, sorted(set(errors))
+ 
+-    intent_count = 0
+-    for symbol in SYMBOLS:
+-        item = decisions.get(symbol)
+-        if not isinstance(item, dict):
+-            errors.append(f"MISSING_OR_INVALID_SYMBOL:{symbol}")
+-            continue
+-
+-        execution_decision = item.get("execution_decision")
+-        intent = item.get("paper_order_intent")
+-        position_exists = item.get("position_exists")
+-        position_id = item.get("position_id")
+-        fill_price = item.get("fill_price")
+-        fill_timestamp = item.get("fill_timestamp")
+-
+-        if execution_decision not in {"NO_ORDER", "PAPER_ORDER_INTENT", "BLOCKED"}:
+-            errors.append(
+-                f"INVALID_EXECUTION_DECISION:{symbol}:{execution_decision!r}"
+-            )
+-
+-        if not isinstance(intent, bool):
+-            errors.append(f"INVALID_PAPER_ORDER_INTENT:{symbol}")
+-
+-        if position_exists is not False:
+-            errors.append(f"POSITION_CLAIM_NOT_FALSE:{symbol}")
+-        if position_id is not None:
+-            errors.append(f"POSITION_ID_PRESENT:{symbol}")
+-
+-        if intent is True:
+-            intent_count += 1
+-            if execution_decision != "PAPER_ORDER_INTENT":
+-                errors.append(f"INTENT_DECISION_INCONSISTENT:{symbol}")
+-            if item.get("paper_order_status") != "PENDING_EXECUTION":
+-                errors.append(f"INTENT_STATUS_INVALID:{symbol}")
+-            if fill_price is not None:
+-                errors.append(f"FABRICATED_FILL_PRICE:{symbol}")
+-            if fill_timestamp is not None:
+-                errors.append(f"FABRICATED_FILL_TIMESTAMP:{symbol}")
+-        elif execution_decision == "PAPER_ORDER_INTENT":
+-            errors.append(f"INTENT_FALSE_FOR_INTENT_DECISION:{symbol}")
++    # Structural validity gates the whole decision only for REQUIRED_SYMBOLS;
++    # every other symbol v0.5.3.16 reported is checked independently, per-
++    # symbol, in build_ledger() below -- one optional symbol's bad data
++    # must never block another symbol's ledger entry. Mirrors the required-
++    # vs-optional pattern already shipped in v0.5.3.12-.16.
++    for symbol in REQUIRED_SYMBOLS:
++        errors.extend(ledger_entry_errors_for_symbol(symbol, decisions.get(symbol)))
++
++    # v0.5.3.16 itself counts ANY symbol's ENTRY_CANDIDATE (required or
++    # optional) toward paper_execution_allowed / overall_execution_decision
++    # -- this cross-check must match that same total scope, not just the
++    # required pair, or a legitimate optional-symbol intent would look like
++    # an upstream inconsistency.
++    intent_count = sum(
++        1
++        for item in decisions.values()
++        if isinstance(item, dict) and item.get("paper_order_intent") is True
++    )
+ 
+     allowed = payload.get("paper_execution_allowed")
+     if allowed is not (intent_count > 0):
+@@ -263,7 +290,9 @@ def build_ledger(payload: dict[str, Any], input_path: Path) -> dict[str, Any]:
+     upstream_ok, errors = verify_upstream(payload)
+     if not upstream_ok:
+         result["blocked_reasons"] = errors
+-        for symbol in SYMBOLS:
++        # Envelope-level failure -- scoped to REQUIRED_SYMBOLS only, same as
++        # the global gate that produced it.
++        for symbol in REQUIRED_SYMBOLS:
+             item = payload.get("decisions", {}).get(symbol)
+             result["ledger_entries"][symbol] = {
+                 "symbol": symbol,
+@@ -283,9 +312,39 @@ def build_ledger(payload: dict[str, Any], input_path: Path) -> dict[str, Any]:
+ 
+     decisions = payload["decisions"]
+     entry_count = 0
++    optional_blocked_symbols: list[str] = []
++
++    # Every symbol v0.5.3.16 actually reported gets its own ledger entry;
++    # REQUIRED_SYMBOLS are added even if somehow absent (verify_upstream
++    # already gated a truly missing/invalid required symbol above, so this
++    # is just defensive). Mirrors the required-vs-optional pattern already
++    # shipped in v0.5.3.12-.16.
++    selected = sorted(set(decisions.keys()) | set(REQUIRED_SYMBOLS))
++
++    for symbol in selected:
++        is_required = symbol in REQUIRED_SYMBOLS
++        item = decisions.get(symbol)
++
++        if not is_required:
++            symbol_errors = ledger_entry_errors_for_symbol(symbol, item)
++            if symbol_errors:
++                result["ledger_entries"][symbol] = {
++                    "symbol": symbol,
++                    "ledger_event": "BLOCKED",
++                    "upstream_execution_decision": (
++                        item.get("execution_decision") if isinstance(item, dict) else None
++                    ),
++                    "paper_order_intent": False,
++                    "order_status": "BLOCKED",
++                    "position_exists": False,
++                    "position_id": None,
++                    "fill_price": None,
++                    "fill_timestamp": None,
++                    "reason": "UPSTREAM_VALIDATION_FAILED",
++                }
++                optional_blocked_symbols.append(symbol)
++                continue
+ 
+-    for symbol in SYMBOLS:
+-        item = decisions[symbol]
+         execution_decision = item["execution_decision"]
+         intent = item["paper_order_intent"]
+ 
+@@ -298,10 +357,19 @@ def build_ledger(payload: dict[str, Any], input_path: Path) -> dict[str, Any]:
+             ledger_event = "NO_ORDER_RECORDED"
+             order_status = "NOT_APPLICABLE"
+             reason = "UPSTREAM_NO_ORDER_RECORDED"
++        elif execution_decision == "BLOCKED" and not is_required:
++            # An optional symbol .16 itself individually blocked -- a
++            # legitimate passthrough, not a data-integrity problem.
++            ledger_event = "BLOCKED"
++            order_status = "BLOCKED"
++            reason = "UPSTREAM_EXECUTION_BLOCKED"
++            optional_blocked_symbols.append(symbol)
+         else:
+             ledger_event = "BLOCKED"
+             order_status = "BLOCKED"
+             reason = "INCONSISTENT_UPSTREAM_EXECUTION_STATE"
++            if not is_required:
++                optional_blocked_symbols.append(symbol)
+ 
+         result["ledger_entries"][symbol] = {
+             "symbol": symbol,
+@@ -316,6 +384,9 @@ def build_ledger(payload: dict[str, Any], input_path: Path) -> dict[str, Any]:
+             "reason": reason,
+         }
+ 
++    if optional_blocked_symbols:
++        result["optional_symbols_blocked"] = sorted(set(optional_blocked_symbols))
++
+     result["decision_status"] = "DECIDED"
+     result["overall_ledger_decision"] = (
+         "INTENTS_RECORDED" if entry_count else "NO_ORDER_RECORDED"
+@@ -370,9 +441,19 @@ def print_report(result: dict[str, Any], output_path: Path) -> None:
+     print(f"STATE ID             : {result['state_id']}")
+     print()
+ 
+-    for symbol in SYMBOLS:
++    reported_symbols = sorted(set(result["ledger_entries"].keys()) | set(REQUIRED_SYMBOLS))
++    optional_blocked = set(result.get("optional_symbols_blocked", []))
++
++    for symbol in reported_symbols:
+         item = result["ledger_entries"].get(symbol)
+-        print(symbol)
++        label = symbol
++        if symbol in REQUIRED_SYMBOLS:
++            label += "  [REQUIRED]"
++        elif symbol in optional_blocked:
++            label += "  [OPTIONAL, BLOCKED -- did not affect overall decision]"
++        else:
++            label += "  [OPTIONAL]"
++        print(label)
+         if not item:
+             print("  LEDGER EVENT       : BLOCKED")
+             print("  POSITION EXISTS    : False")
+diff --git a/tests/test_aura_v05317_decision_execution_ledger.py b/tests/test_aura_v05317_decision_execution_ledger.py
+new file mode 100644
+index 0000000..eba0b79
+--- /dev/null
++++ b/tests/test_aura_v05317_decision_execution_ledger.py
+@@ -0,0 +1,245 @@
++"""
++Contract tests for AURA v0.5.3.17 Decision / Execution Ledger.
++
++Covers the required-vs-optional symbol handling added on top of the
++original locked BTC/ETH-only architecture: REQUIRED_SYMBOLS (BTC/ETH)
++remain the only symbols whose structural invalidity can block the whole
++ledger decision; every other symbol v0.5.3.16 reports (including one
++v0.5.3.16 itself individually blocked) gets its own ledger entry
++independently. Also covers the intent-count cross-check now spanning the
++full symbol set, since v0.5.3.16 itself counts any symbol toward
++paper_execution_allowed / overall_execution_decision.
++"""
++from __future__ import annotations
++
++import importlib.util
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def _load(module_filename: str, module_name: str):
++    spec = importlib.util.spec_from_file_location(module_name, ROOT / module_filename)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[module_name] = module
++    spec.loader.exec_module(module)  # type: ignore[union-attr]
++    return module
++
++
++ledger = _load("aura_v05317_decision_execution_ledger.py", "aura_v05317_ledger")
++
++REQUIRED_SYMBOLS = ledger.REQUIRED_SYMBOLS
++
++
++def paper_order_intent() -> dict:
++    return {
++        "execution_decision": "PAPER_ORDER_INTENT",
++        "paper_order_intent": True,
++        "paper_order_status": "PENDING_EXECUTION",
++        "position_exists": False,
++        "position_id": None,
++        "fill_price": None,
++        "fill_timestamp": None,
++    }
++
++
++def no_order() -> dict:
++    return {
++        "execution_decision": "NO_ORDER",
++        "paper_order_intent": False,
++        "paper_order_status": "NOT_APPLICABLE",
++        "position_exists": False,
++        "position_id": None,
++        "fill_price": None,
++        "fill_timestamp": None,
++    }
++
++
++def blocked() -> dict:
++    return {
++        "execution_decision": "BLOCKED",
++        "paper_order_intent": False,
++        "paper_order_status": "BLOCKED",
++        "position_exists": False,
++        "position_id": None,
++        "fill_price": None,
++        "fill_timestamp": None,
++    }
++
++
++def make_paper_execution_payload(symbol_specs: dict) -> dict:
++    decisions = {}
++    for symbol, spec in symbol_specs.items():
++        if spec is None:
++            continue
++        decisions[symbol] = {"symbol": symbol, **spec}
++
++    has_intent = any(
++        spec is not None and spec["paper_order_intent"] is True for spec in symbol_specs.values()
++    )
++
++    payload = {
++        "agent_version": "AURA v0.5.3.16",
++        "engine": "PAPER_EXECUTION",
++        "decision_status": "DECIDED",
++        "overall_execution_decision": "PAPER_ORDER_INTENT" if has_intent else "NO_ORDER",
++        "paper_execution_allowed": has_intent,
++        "live_execution_permitted": False,
++        "generated_from": "test-fixture",
++        "input_position_state_hash": "testfixturehash",
++        "input_position_state_hash_verified": True,
++        "upstream_state_id": "PS-testfixture0000000000",
++        "upstream_hash_verified": True,
++        "frozen_configuration_verified": True,
++        "decisions": decisions,
++        "blocked_reasons": [],
++        "guardrails": {
++            "single_source_of_truth": True,
++            "source_engine": "AURA v0.5.3.15",
++            "market_data_fetch": False,
++            "indicator_recalculation": False,
++            "signal_recalculation": False,
++            "risk_recalculation": False,
++            "position_sizing": False,
++            "position_creation": False,
++            "exchange_state_mutation": False,
++            "orders_allowed": False,
++            "live_execution": False,
++            "fabricated_fill_price": False,
++            "position_claim_from_intent": False,
++            "fail_closed": True,
++        },
++    }
++
++    canonical = {
++        "agent_version": payload["agent_version"],
++        "engine": payload["engine"],
++        "decision_status": payload["decision_status"],
++        "overall_execution_decision": payload["overall_execution_decision"],
++        "paper_execution_allowed": payload["paper_execution_allowed"],
++        "live_execution_permitted": payload["live_execution_permitted"],
++        "upstream_state_id": payload["upstream_state_id"],
++        "upstream_hash_verified": payload["upstream_hash_verified"],
++        "frozen_configuration_verified": payload["frozen_configuration_verified"],
++        "decisions": payload["decisions"],
++        "blocked_reasons": payload["blocked_reasons"],
++    }
++    payload["state_hash"] = ledger.sha256_text(ledger.stable_json(canonical))
++    payload["state_id"] = f"PE-{payload['state_hash'][:24]}"
++    return payload
++
++
++def run(symbol_specs: dict) -> dict:
++    payload = make_paper_execution_payload(symbol_specs)
++    return ledger.build_ledger(payload, Path("test-fixture-input.json"))
++
++
++# ---------------------------------------------------------------------------
++# Required-pair (BTC/ETH) baseline behavior -- unchanged from the original
++# architecture.
++# ---------------------------------------------------------------------------
++
++
++def test_intent_on_both_required_symbols_is_recorded():
++    result = run({"BTC/USD": paper_order_intent(), "ETH/USD": paper_order_intent()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_ledger_decision"] == "INTENTS_RECORDED"
++    for symbol in REQUIRED_SYMBOLS:
++        entry = result["ledger_entries"][symbol]
++        assert entry["ledger_event"] == "PAPER_ORDER_INTENT_RECORDED"
++        assert entry["position_exists"] is False
++
++
++def test_no_order_on_both_required_symbols_is_no_order_recorded():
++    result = run({"BTC/USD": no_order(), "ETH/USD": no_order()})
++
++    assert result["overall_ledger_decision"] == "NO_ORDER_RECORDED"
++
++
++def test_missing_required_symbol_blocks_whole_decision():
++    result = run({"BTC/USD": paper_order_intent(), "ETH/USD": None})
++
++    assert result["overall_ledger_decision"] == "BLOCKED"
++    assert any("MISSING_OR_INVALID_SYMBOL:ETH/USD" in r for r in result["blocked_reasons"])
++
++
++def test_required_symbol_fabricated_fill_price_blocks_whole_decision():
++    bad = paper_order_intent()
++    bad["fill_price"] = 65000.0  # v0.5.3.16 must never fabricate a fill
++    result = run({"BTC/USD": bad, "ETH/USD": no_order()})
++
++    assert result["overall_ledger_decision"] == "BLOCKED"
++    assert any("FABRICATED_FILL_PRICE:BTC/USD" in r for r in result["blocked_reasons"])
++
++
++# ---------------------------------------------------------------------------
++# Optional (all-coin-universe) symbol handling
++# ---------------------------------------------------------------------------
++
++
++def test_optional_symbol_intent_recorded_independently_and_counted_in_cross_check():
++    # AVAX is the only symbol with an intent -- .16's own aggregate fields
++    # (paper_execution_allowed / overall_execution_decision) reflect that,
++    # so the cross-check must span the full symbol set, not just required.
++    result = run({"BTC/USD": no_order(), "ETH/USD": no_order(), "AVAX/USD": paper_order_intent()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_ledger_decision"] == "INTENTS_RECORDED"
++    assert result["ledger_entries"]["AVAX/USD"]["ledger_event"] == "PAPER_ORDER_INTENT_RECORDED"
++    assert "optional_symbols_blocked" not in result
++
++
++def test_optional_symbol_blocked_upstream_does_not_block_required_pair():
++    result = run({"BTC/USD": paper_order_intent(), "ETH/USD": no_order(), "AVAX/USD": blocked()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_ledger_decision"] == "INTENTS_RECORDED"
++    assert result["ledger_entries"]["AVAX/USD"]["ledger_event"] == "BLOCKED"
++    assert result["ledger_entries"]["AVAX/USD"]["reason"] == "UPSTREAM_EXECUTION_BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++    assert result["ledger_entries"]["BTC/USD"]["ledger_event"] == "PAPER_ORDER_INTENT_RECORDED"
++
++
++def test_optional_symbol_structural_inconsistency_blocks_only_that_symbol():
++    bad_avax = paper_order_intent()
++    bad_avax["fill_price"] = 40.0  # fabricated fill, same class of issue as the required-symbol case
++    result = run({"BTC/USD": no_order(), "ETH/USD": no_order(), "AVAX/USD": bad_avax})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["ledger_entries"]["AVAX/USD"]["ledger_event"] == "BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++    assert result["ledger_entries"]["BTC/USD"]["ledger_event"] == "NO_ORDER_RECORDED"
++
++
++def test_full_coin_universe_optional_symbols_evaluated_independently():
++    result = run({
++        "BTC/USD": no_order(),
++        "ETH/USD": no_order(),
++        "AVAX/USD": paper_order_intent(),
++        "SOL/USD": no_order(),
++        "DOGE/USD": blocked(),
++    })
++
++    assert result["overall_ledger_decision"] == "INTENTS_RECORDED"
++    assert result["ledger_entries"]["AVAX/USD"]["ledger_event"] == "PAPER_ORDER_INTENT_RECORDED"
++    assert result["ledger_entries"]["SOL/USD"]["ledger_event"] == "NO_ORDER_RECORDED"
++    assert result["ledger_entries"]["DOGE/USD"]["ledger_event"] == "BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["DOGE/USD"]
++
++
++# ---------------------------------------------------------------------------
++# print_report() smoke test -- must not reference the old fixed SYMBOLS tuple
++# ---------------------------------------------------------------------------
++
++
++def test_print_report_covers_all_reported_symbols_including_optional(capsys):
++    result = run({"BTC/USD": paper_order_intent(), "ETH/USD": no_order(), "AVAX/USD": blocked()})
++
++    ledger.print_report(result, Path("test-output.json"))
++    out = capsys.readouterr().out
++
++    assert "BTC/USD  [REQUIRED]" in out
++    assert "ETH/USD  [REQUIRED]" in out
++    assert "AVAX/USD  [OPTIONAL, BLOCKED" in out
+-- 
+2.43.0
+

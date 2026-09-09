@@ -1,0 +1,28 @@
+{
+  "config": {
+    "version": "AURA_v0.5.0",
+    "experiment": "C0",
+    "venue": "MEXC_CONTRACT",
+    "symbols": [
+      "BTC_USDT",
+      "ETH_USDT"
+    ],
+    "interval": "Min60",
+    "hold_bars": 10,
+    "fee_bps": 1.0,
+    "slippage_bps": 5.0,
+    "leverage": 1.0,
+    "signal_definition": "EMA3/EMA8 bullish crossover + MACD histogram > 0 + RelVol >= 1"
+  },
+  "start": "2026-07-27T15:00:00+00:00",
+  "end": "2026-08-26T15:00:00+00:00",
+  "research_status": "C0_BASELINE_COMPLETE",
+  "execution": "NONE",
+  "notes": [
+    "C0 is a control experiment, not evidence of crypto alpha.",
+    "Signal is frozen and intentionally not optimized in v0.5.0.",
+    "Entry occurs on the next bar OPEN after a signal bar closes.",
+    "Funding is tracked separately and included in net_return.",
+    "Historical OI is not inferred from the current ticker; no fake OI history is created."
+  ]
+}

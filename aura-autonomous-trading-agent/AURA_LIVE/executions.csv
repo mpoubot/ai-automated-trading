@@ -1,0 +1,1 @@
+execution_id,position_id,signal_id,model,symbol,side,date,price_raw,price_simulated,slippage_bps,commission_bps,friction_return,exit_type,created_at

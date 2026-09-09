@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local credentials / account exports
+*secret*
+*credential*
+*api_key*
+*api-key*
+
+# Research outputs are local unless deliberately promoted
+/data/raw/
+/data/cache/
+/data/outputs/

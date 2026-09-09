@@ -1,0 +1,454 @@
+From 5bb02d28453207d91ebeb6b10854cd1df5d92ae6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 15:47:50 +0000
+Subject: [PATCH 03/10] .15 Position State: required-vs-optional symbol
+ handling for full coin universe
+
+Same pattern as .13/.14: REQUIRED_SYMBOLS (BTC/ETH) remain the only
+symbols whose absence or an invalid/inconsistent upstream risk decision
+can block the whole position-state decision. Every other symbol .14
+reports -- including one .14 itself individually blocked -- gets its own
+position state independently.
+
+Specific changes:
+- verify_upstream()'s per-symbol loop scoped to REQUIRED_SYMBOLS only.
+- New risk_decision_consistency_errors(symbol, item, allow_blocked) helper
+  factors out the original per-symbol check; called with allow_blocked=False
+  for the required-symbol gate (preserving exact prior behavior/reason
+  strings) and allow_blocked=True per optional symbol, since an optional
+  symbol may legitimately arrive BLOCKED from .14's own optional-symbol
+  handling without that being a contract violation.
+- build_position_state()'s main loop iterates every symbol .14 reported
+  (union with REQUIRED_SYMBOLS): required symbols keep the original
+  RISK_PASS->ENTRY_CANDIDATE / else->FLAT logic; optional symbols get
+  ENTRY_CANDIDATE/FLAT/BLOCKED based on their own upstream decision,
+  recorded in optional_symbols_blocked when BLOCKED, without affecting
+  the required pair.
+- overall_position_state now factors in ENTRY_CANDIDATE from ANY symbol
+  (required or optional) -- consistent with .13/.14's existing
+  any-symbol-can-signal design -- while an optional symbol's own BLOCKED
+  state can never by itself flip the aggregate to BLOCKED.
+- print_report() iterates actual decisions instead of a fixed BTC/ETH
+  tuple, labeling each symbol REQUIRED/OPTIONAL.
+
+Adds 9 contract tests, including optional-blocked-does-not-cascade and
+an "only optional blocked, required flat -> overall FLAT not BLOCKED"
+regression test. Also verified with a real .12-shaped snapshot run
+through the actual .13 -> .14 -> .15 chain: a neutral BTC/ETH pair plus
+an AVAX mirror-candidate signal reaches ENTRY_CANDIDATE, and a DOGE
+symbol with invalid source data is cleanly BLOCKED at every stage without
+affecting BTC/ETH/AVAX. Full suite (41 tests) green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05315_position_state.py            | 135 +++++++++++----
+ tests/test_aura_v05315_position_state.py | 204 +++++++++++++++++++++++
+ 2 files changed, 311 insertions(+), 28 deletions(-)
+ create mode 100644 tests/test_aura_v05315_position_state.py
+
+diff --git a/aura_v05315_position_state.py b/aura_v05315_position_state.py
+index 7fe5e60..7cd4ac8 100644
+--- a/aura_v05315_position_state.py
++++ b/aura_v05315_position_state.py
+@@ -54,7 +54,14 @@ EXPECTED_SOURCE_ENGINE = "RISK_GATE"
+ DEFAULT_INPUT = Path(r"regime_output\risk_gate\risk_gate.json")
+ DEFAULT_OUTPUT = Path(r"regime_output\position_state\position_state.json")
+ SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
++# block the whole position-state decision if missing/invalid/inconsistent.
++# Kept as a separate name (aliased to SYMBOLS) so the rest of this file
++# reads unambiguously -- mirrors the same alias in v0.5.3.13/.14.
+ ALLOWED_UPSTREAM = {"NO_SIGNAL", "RISK_PASS"}
++# An optional symbol may also legitimately arrive BLOCKED (v0.5.3.14 blocks
++# an individual optional symbol without blocking the required pair).
++ALLOWED_UPSTREAM_OPTIONAL = ALLOWED_UPSTREAM | {"BLOCKED"}
+ 
+ 
+ def stable_json(obj: Any) -> str:
+@@ -164,23 +171,46 @@ def verify_upstream(payload: dict[str, Any]) -> list[str]:
+         errors.append("MISSING_UPSTREAM_DECISIONS")
+         return sorted(set(errors))
+ 
+-    for symbol in SYMBOLS:
+-        item = decisions.get(symbol)
+-        if not isinstance(item, dict):
+-            errors.append(f"MISSING_OR_INVALID_SYMBOL:{symbol}")
+-            continue
+-        upstream = item.get("risk_decision")
+-        authorized = item.get("risk_authorized")
+-        if upstream not in ALLOWED_UPSTREAM:
+-            errors.append(f"INVALID_RISK_DECISION:{symbol}:{upstream!r}")
+-        if upstream == "RISK_PASS" and authorized is not True:
+-            errors.append(f"RISK_PASS_NOT_AUTHORIZED:{symbol}")
+-        if upstream == "NO_SIGNAL" and authorized is not False:
+-            errors.append(f"NO_SIGNAL_AUTHORIZATION_INCONSISTENT:{symbol}")
++    # Only REQUIRED_SYMBOLS (BTC/ETH) gate the whole decision here. Every
++    # other symbol v0.5.3.14 reports is validated independently, per-symbol,
++    # in build_position_state() below -- one optional symbol's bad/blocked
++    # upstream data must never block another symbol's position state.
++    for symbol in REQUIRED_SYMBOLS:
++        errors.extend(
++            risk_decision_consistency_errors(symbol, decisions.get(symbol), allow_blocked=False)
++        )
+ 
+     return sorted(set(errors))
+ 
+ 
++def risk_decision_consistency_errors(
++    symbol: str, item: Any, *, allow_blocked: bool
++) -> list[str]:
++    """
++    Check that a single symbol's upstream risk decision is internally
++    consistent (a known risk_decision value whose risk_authorized flag
++    agrees with it). No risk is recalculated here.
++    """
++    if not isinstance(item, dict):
++        return [f"MISSING_OR_INVALID_SYMBOL:{symbol}"]
++
++    upstream = item.get("risk_decision")
++    authorized = item.get("risk_authorized")
++    allowed = ALLOWED_UPSTREAM_OPTIONAL if allow_blocked else ALLOWED_UPSTREAM
++
++    errors: list[str] = []
++    if upstream not in allowed:
++        errors.append(f"INVALID_RISK_DECISION:{symbol}:{upstream!r}")
++    if upstream == "RISK_PASS" and authorized is not True:
++        errors.append(f"RISK_PASS_NOT_AUTHORIZED:{symbol}")
++    if upstream == "NO_SIGNAL" and authorized is not False:
++        errors.append(f"NO_SIGNAL_AUTHORIZATION_INCONSISTENT:{symbol}")
++    if upstream == "BLOCKED" and authorized is not False:
++        errors.append(f"BLOCKED_AUTHORIZATION_INCONSISTENT:{symbol}")
++
++    return errors
++
++
+ def build_position_state(payload: dict[str, Any], input_path: Path) -> dict[str, Any]:
+     result = base_result(input_path)
+     result["input_risk_gate_hash"] = risk_gate_hash(payload)
+@@ -194,24 +224,60 @@ def build_position_state(payload: dict[str, Any], input_path: Path) -> dict[str,
+         return finalize(result)
+ 
+     signal_states: list[str] = []
++    optional_blocked_symbols: list[str] = []
+     decisions = payload["decisions"]
+ 
+-    for symbol in SYMBOLS:
+-        item = decisions[symbol]
+-        risk_decision = item["risk_decision"]
++    # Every symbol v0.5.3.14 actually reported gets its own position state;
++    # REQUIRED_SYMBOLS are added even if somehow absent (verify_upstream
++    # already gated a truly missing/invalid required symbol above, so this
++    # is just defensive). Mirrors the required-vs-optional pattern already
++    # shipped in v0.5.3.12/.13/.14.
++    selected = sorted(set(decisions.keys()) | set(REQUIRED_SYMBOLS))
++
++    for symbol in selected:
++        is_required = symbol in REQUIRED_SYMBOLS
++        item = decisions.get(symbol)
+ 
+-        if risk_decision == "RISK_PASS":
+-            position_state = "ENTRY_CANDIDATE"
+-            reason = "RISK_PASS_AWAITING_EXECUTION"
++        if is_required:
++            # Already verified consistent (NO_SIGNAL/RISK_PASS only) by
++            # verify_upstream() above.
++            risk_decision = item["risk_decision"]
++            risk_authorized = item["risk_authorized"]
++            if risk_decision == "RISK_PASS":
++                position_state = "ENTRY_CANDIDATE"
++                reason = "RISK_PASS_AWAITING_EXECUTION"
++            else:
++                position_state = "FLAT"
++                reason = "NO_RISK_AUTHORIZED_ENTRY"
++            signal_states.append(position_state)
+         else:
+-            position_state = "FLAT"
+-            reason = "NO_RISK_AUTHORIZED_ENTRY"
++            symbol_errors = risk_decision_consistency_errors(symbol, item, allow_blocked=True)
++            risk_decision = item.get("risk_decision") if isinstance(item, dict) else None
++            risk_authorized = item.get("risk_authorized") if isinstance(item, dict) else False
++
++            if symbol_errors:
++                position_state = "BLOCKED"
++                reason = "UPSTREAM_RISK_DECISION_INVALID"
++                optional_blocked_symbols.append(symbol)
++            elif risk_decision == "RISK_PASS":
++                position_state = "ENTRY_CANDIDATE"
++                reason = "RISK_PASS_AWAITING_EXECUTION"
++                signal_states.append(position_state)
++            elif risk_decision == "NO_SIGNAL":
++                position_state = "FLAT"
++                reason = "NO_RISK_AUTHORIZED_ENTRY"
++                signal_states.append(position_state)
++            else:
++                # BLOCKED upstream -- this optional symbol's own bad data
++                # blocks only its own position state, never the cycle.
++                position_state = "BLOCKED"
++                reason = "UPSTREAM_RISK_BLOCKED"
++                optional_blocked_symbols.append(symbol)
+ 
+-        signal_states.append(position_state)
+         result["decisions"][symbol] = {
+             "symbol": symbol,
+             "upstream_risk_decision": risk_decision,
+-            "risk_authorized": item["risk_authorized"],
++            "risk_authorized": risk_authorized,
+             "position_state": position_state,
+             "position_exists": False,
+             "position_id": None,
+@@ -221,13 +287,16 @@ def build_position_state(payload: dict[str, Any], input_path: Path) -> dict[str,
+     # No observed execution/reconciliation source exists in this contract.
+     # Therefore OPEN can never be asserted by this module.
+     result["decision_status"] = "DECIDED"
+-    if all(state == "FLAT" for state in signal_states):
+-        result["overall_position_state"] = "FLAT"
+-    elif any(state == "ENTRY_CANDIDATE" for state in signal_states):
++    if any(state == "ENTRY_CANDIDATE" for state in signal_states):
+         result["overall_position_state"] = "ENTRY_CANDIDATE"
++    elif signal_states:
++        result["overall_position_state"] = "FLAT"
+     else:
+         result["overall_position_state"] = "BLOCKED"
+ 
++    if optional_blocked_symbols:
++        result["optional_symbols_blocked"] = sorted(optional_blocked_symbols)
++
+     return finalize(result)
+ 
+ 
+@@ -280,9 +349,19 @@ def print_report(result: dict[str, Any], output_path: Path) -> None:
+     print(f"STATE ID             : {result['state_id']}")
+     print()
+ 
+-    for symbol in SYMBOLS:
++    reported_symbols = sorted(set(result["decisions"].keys()) | set(REQUIRED_SYMBOLS))
++    optional_blocked = set(result.get("optional_symbols_blocked", []))
++
++    for symbol in reported_symbols:
+         item = result["decisions"].get(symbol)
+-        print(symbol)
++        label = symbol
++        if symbol in REQUIRED_SYMBOLS:
++            label += "  [REQUIRED]"
++        elif symbol in optional_blocked:
++            label += "  [OPTIONAL, BLOCKED -- did not affect overall decision]"
++        else:
++            label += "  [OPTIONAL]"
++        print(label)
+         if not item:
+             print("  POSITION STATE     : BLOCKED")
+             print("  POSITION EXISTS    : False")
+diff --git a/tests/test_aura_v05315_position_state.py b/tests/test_aura_v05315_position_state.py
+new file mode 100644
+index 0000000..c834983
+--- /dev/null
++++ b/tests/test_aura_v05315_position_state.py
+@@ -0,0 +1,204 @@
++"""
++Contract tests for AURA v0.5.3.15 Position State Manager.
++
++Covers the required-vs-optional symbol handling added on top of the
++original locked BTC/ETH-only architecture: REQUIRED_SYMBOLS (BTC/ETH)
++remain the only symbols whose absence or invalid/inconsistent risk
++decision can block the whole position-state decision; every other symbol
++v0.5.3.14 reports (including one v0.5.3.14 itself individually blocked)
++is evaluated independently.
++
++Fixtures build v0.5.3.14-shaped upstream payloads directly (structurally
++faithful to the real module's output schema), matching the convention
++used by the other contract test files in this repo.
++"""
++from __future__ import annotations
++
++import importlib.util
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def _load(module_filename: str, module_name: str):
++    spec = importlib.util.spec_from_file_location(module_name, ROOT / module_filename)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[module_name] = module
++    spec.loader.exec_module(module)  # type: ignore[union-attr]
++    return module
++
++
++posstate = _load("aura_v05315_position_state.py", "aura_v05315_posstate")
++
++REQUIRED_SYMBOLS = posstate.REQUIRED_SYMBOLS
++
++
++def risk_pass() -> dict:
++    return {"risk_decision": "RISK_PASS", "risk_authorized": True}
++
++
++def no_signal() -> dict:
++    return {"risk_decision": "NO_SIGNAL", "risk_authorized": False}
++
++
++def blocked() -> dict:
++    return {"risk_decision": "BLOCKED", "risk_authorized": False}
++
++
++def make_risk_gate_payload(symbol_specs: dict) -> dict:
++    decisions = {}
++    for symbol, spec in symbol_specs.items():
++        if spec is None:
++            continue
++        decisions[symbol] = {
++            "symbol": symbol,
++            "upstream_decision": "SIGNAL_CANDIDATE" if spec["risk_decision"] == "RISK_PASS" else "NO_SIGNAL",
++            "risk_decision": spec["risk_decision"],
++            "risk_authorized": spec["risk_authorized"],
++            "reason": "TEST_FIXTURE",
++        }
++
++    return {
++        "agent_version": "AURA v0.5.3.14",
++        "engine": "RISK_GATE",
++        "decision_status": "DECIDED",
++        "overall_risk_decision": "RISK_PASS",
++        "risk_authorized": True,
++        "execution_permitted": False,
++        "generated_from": "test-fixture",
++        "input_decision_hash": "testfixturehash",
++        "input_decision_hash_verified": True,
++        "upstream_state_id": "MS-testfixture0000000000",
++        "upstream_state_hash_verified": True,
++        "frozen_configuration_verified": True,
++        "risk_checks": {},
++        "decisions": decisions,
++        "blocked_reasons": [],
++        "guardrails": {
++            "single_source_of_truth": True,
++            "source_engine": "AURA v0.5.3.13",
++            "indicator_recalculation": False,
++            "market_data_fetch": False,
++            "signal_recalculation": False,
++            "risk_recalculation": False,
++            "position_sizing": False,
++            "position_creation": False,
++            "exchange_state_mutation": False,
++            "orders_allowed": False,
++            "paper_execution": False,
++            "live_execution": False,
++            "fail_closed": True,
++        },
++    }
++
++
++def run(symbol_specs: dict) -> dict:
++    payload = make_risk_gate_payload(symbol_specs)
++    return posstate.build_position_state(payload, Path("test-fixture-input.json"))
++
++
++# ---------------------------------------------------------------------------
++# Required-pair (BTC/ETH) baseline behavior -- unchanged from the original
++# architecture.
++# ---------------------------------------------------------------------------
++
++
++def test_risk_pass_on_both_required_symbols_is_entry_candidate():
++    result = run({"BTC/USD": risk_pass(), "ETH/USD": risk_pass()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_position_state"] == "ENTRY_CANDIDATE"
++    for symbol in REQUIRED_SYMBOLS:
++        assert result["decisions"][symbol]["position_state"] == "ENTRY_CANDIDATE"
++        assert result["decisions"][symbol]["position_exists"] is False
++
++
++def test_no_signal_on_both_required_symbols_is_flat():
++    result = run({"BTC/USD": no_signal(), "ETH/USD": no_signal()})
++
++    assert result["overall_position_state"] == "FLAT"
++    for symbol in REQUIRED_SYMBOLS:
++        assert result["decisions"][symbol]["position_state"] == "FLAT"
++
++
++def test_missing_required_symbol_blocks_whole_decision():
++    result = run({"BTC/USD": risk_pass(), "ETH/USD": None})
++
++    assert result["overall_position_state"] == "BLOCKED"
++    assert any("MISSING_OR_INVALID_SYMBOL:ETH/USD" in r for r in result["blocked_reasons"])
++
++
++def test_required_symbol_invalid_risk_decision_blocks_whole_decision():
++    result = run({"BTC/USD": blocked(), "ETH/USD": no_signal()})
++
++    assert result["overall_position_state"] == "BLOCKED"
++    assert any("INVALID_RISK_DECISION:BTC/USD" in r for r in result["blocked_reasons"])
++
++
++# ---------------------------------------------------------------------------
++# Optional (all-coin-universe) symbol handling
++# ---------------------------------------------------------------------------
++
++
++def test_optional_symbol_risk_pass_becomes_entry_candidate_independently():
++    result = run({"BTC/USD": no_signal(), "ETH/USD": no_signal(), "AVAX/USD": risk_pass()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_position_state"] == "ENTRY_CANDIDATE"
++    assert result["decisions"]["AVAX/USD"]["position_state"] == "ENTRY_CANDIDATE"
++    assert "optional_symbols_blocked" not in result
++
++
++def test_optional_symbol_blocked_upstream_does_not_block_required_pair():
++    result = run({"BTC/USD": risk_pass(), "ETH/USD": no_signal(), "AVAX/USD": blocked()})
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_position_state"] == "ENTRY_CANDIDATE"
++    assert result["decisions"]["AVAX/USD"]["position_state"] == "BLOCKED"
++    assert result["decisions"]["AVAX/USD"]["reason"] == "UPSTREAM_RISK_BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++    # Required pair unaffected.
++    assert result["decisions"]["BTC/USD"]["position_state"] == "ENTRY_CANDIDATE"
++
++
++def test_full_coin_universe_optional_symbols_evaluated_independently():
++    result = run({
++        "BTC/USD": no_signal(),
++        "ETH/USD": no_signal(),
++        "AVAX/USD": risk_pass(),
++        "SOL/USD": no_signal(),
++        "DOGE/USD": blocked(),
++    })
++
++    assert result["overall_position_state"] == "ENTRY_CANDIDATE"
++    assert result["decisions"]["AVAX/USD"]["position_state"] == "ENTRY_CANDIDATE"
++    assert result["decisions"]["SOL/USD"]["position_state"] == "FLAT"
++    assert result["decisions"]["DOGE/USD"]["position_state"] == "BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["DOGE/USD"]
++
++
++def test_only_optional_blocked_symbols_and_required_flat_is_overall_flat():
++    # No ENTRY_CANDIDATE anywhere -- required pair FLAT, one optional symbol
++    # individually blocked. Overall must be FLAT, not BLOCKED: the optional
++    # symbol's bad data must never flip the aggregate to BLOCKED.
++    result = run({"BTC/USD": no_signal(), "ETH/USD": no_signal(), "AVAX/USD": blocked()})
++
++    assert result["overall_position_state"] == "FLAT"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++
++
++# ---------------------------------------------------------------------------
++# print_report() smoke test -- must not reference the old fixed SYMBOLS tuple
++# ---------------------------------------------------------------------------
++
++
++def test_print_report_covers_all_reported_symbols_including_optional(capsys):
++    result = run({"BTC/USD": risk_pass(), "ETH/USD": no_signal(), "AVAX/USD": blocked()})
++
++    posstate.print_report(result, Path("test-output.json"))
++    out = capsys.readouterr().out
++
++    assert "BTC/USD  [REQUIRED]" in out
++    assert "ETH/USD  [REQUIRED]" in out
++    assert "AVAX/USD  [OPTIONAL, BLOCKED" in out
+-- 
+2.43.0
+

@@ -1,0 +1,24 @@
+AURA v0.5.0 C0 — next research steps
+
+1) Keep the C0 parameters frozen.
+2) Extend the historical window:
+   python aura_v050_crypto_research_c0.py --days 180
+
+3) Run the diagnostic layer:
+   python aura_v050_crypto_c0_diagnostics.py
+
+4) Open:
+   AURA_CRYPTO\C0_diagnostic_report.html
+
+Do not choose symbols, hours, stops, targets, or timeframe from the 30-day diagnostic.
+Those are observations only until the larger C0 sample and independent validation are complete.
+
+C0 frozen control:
+- BTC_USDT + ETH_USDT
+- 1H
+- EMA3/EMA8 bullish crossover + MACD histogram > 0 + RelVol >= 1
+- next-bar-open entry
+- 10 complete 1H bars
+- 12 bp round-trip friction
+- funding tracked separately and included in net return
+- no live orders

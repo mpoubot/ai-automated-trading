@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MEXC Bot Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1216; --card: #171b21; --border: #262c35;
+    --text: #e6e9ef; --muted: #8b93a1;
+    --green: #3ecf8e; --red: #f0556b; --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .banner {
+    display: none; background: #3a1c22; border: 1px solid var(--red); color: #ffb3bd;
+    padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 14px;
+  }
+  .banner.show { display: block; }
+  .dry-run-badge {
+    display: inline-block; background: #2a2410; color: #e0c15a; border: 1px solid #6b5a1f;
+    font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 8px; vertical-align: middle;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .card .value { font-size: 22px; font-weight: 600; }
+  .value.pos { color: var(--green); } .value.neg { color: var(--red); }
+  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 24px; }
+  .chart-card h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 500; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .side-long { color: var(--green); } .side-short { color: var(--red); }
+  .pnl-pos { color: var(--green); } .pnl-neg { color: var(--red); }
+  .section-title { font-size: 14px; color: var(--muted); margin: 0 0 12px; font-weight: 500; }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+  .updated { color: var(--muted); font-size: 11px; margin-top: 20px; text-align: right; }
+</style>
+</head>
+<body>
+  <h1>MEXC Bot Dashboard <span id="dry-run-badge" class="dry-run-badge" style="display:none;">DRY RUN</span></h1>
+  <div class="subtitle">Auto-refreshes every 10s from the live bot</div>
+  <div id="halt-banner" class="banner"></div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Equity</div><div class="value" id="stat-equity">–</div></div>
+    <div class="card"><div class="label">Total Return</div><div class="value" id="stat-return">–</div></div>
+    <div class="card"><div class="label">Drawdown from Peak</div><div class="value" id="stat-dd">–</div></div>
+    <div class="card"><div class="label">Win Rate <span style="font-size:10px;opacity:.6">(per trade)</span></div><div class="value" id="stat-winrate">–</div></div>
+    <div class="card"><div class="label">Profit Factor</div><div class="value" id="stat-pf">–</div></div>
+    <div class="card"><div class="label">Closed Trades</div><div class="value" id="stat-trades">–</div></div>
+    <div class="card"><div class="label">Open Positions</div><div class="value" id="stat-open">–</div></div>
+  </div>
+
+  <div class="chart-card">
+    <h2>Equity Curve</h2>
+    <canvas id="equityChart" height="80"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <p class="section-title">Open Positions</p>
+    <div id="open-positions-table"></div>
+  </div>
+
+  <div class="chart-card">
+    <p class="section-title">Recent Events</p>
+    <div id="recent-events-table"></div>
+  </div>
+
+  <div class="updated" id="last-updated"></div>
+
+<script>
+let chart = null;
+
+function fmtMoney(n) { return "$" + Number(n).toFixed(2); }
+function fmtPct(n) { return Number(n).toFixed(2) + "%"; }
+
+function renderStats(d) {
+  const s = d.stats;
+  if (!s || Object.keys(s).length === 0) return;
+  document.getElementById("stat-equity").textContent = fmtMoney(s.current_equity);
+  const retEl = document.getElementById("stat-return");
+  retEl.textContent = (s.total_return_pct >= 0 ? "+" : "") + fmtPct(s.total_return_pct);
+  retEl.className = "value " + (s.total_return_pct >= 0 ? "pos" : "neg");
+  document.getElementById("stat-dd").textContent = fmtPct(s.drawdown_pct);
+  document.getElementById("stat-winrate").textContent = fmtPct(s.win_rate_pct);
+  const pfEl = document.getElementById("stat-pf");
+  if (pfEl) {
+    const pf = s.profit_factor;
+    pfEl.textContent = (pf === null || pf === undefined) ? "–" : Number(pf).toFixed(2);
+    // 1.0 is breakeven — below that the system loses money regardless of win rate
+    pfEl.className = "value " + (pf > 1 ? "pos" : "neg");
+  }
+  document.getElementById("stat-trades").textContent = s.total_closed_trades;
+  document.getElementById("stat-open").textContent = d.open_positions.length;
+
+  document.getElementById("dry-run-badge").style.display = d.dry_run ? "inline-block" : "none";
+
+  const banner = document.getElementById("halt-banner");
+  if (d.halted) {
+    banner.textContent = "🛑 Bot halted: " + d.halt_reason;
+    banner.classList.add("show");
+  } else {
+    banner.classList.remove("show");
+  }
+}
+
+function renderOpenPositions(positions) {
+  const el = document.getElementById("open-positions-table");
+  if (!positions.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  let html = "<table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Leverage</th></tr>";
+  for (const p of positions) {
+    html += `<tr><td>${p.symbol}</td><td class="side-${p.side}">${p.side.toUpperCase()}</td>` +
+            `<td>${Number(p.entry_price).toFixed(6)}</td><td>${Number(p.stop_price).toFixed(6)}</td>` +
+            `<td>${p.leverage}x</td></tr>`;
+  }
+  html += "</table>";
+  el.innerHTML = html;
+}
+
+function renderRecentEvents(events) {
+  const el = document.getElementById("recent-events-table");
+  if (!events.length) { el.innerHTML = '<div class="empty">No trade events yet</div>'; return; }
+  let html = "<table><tr><th>Time</th><th>Symbol</th><th>Event</th><th>Side</th><th>Price</th><th>PnL</th><th>Equity</th></tr>";
+  for (const e of events) {
+    const pnlClass = (e.pnl != null && e.pnl < 0) ? "pnl-neg" : "pnl-pos";
+    const pnlText = e.pnl != null ? fmtMoney(e.pnl) : "–";
+    const t = e.timestamp ? e.timestamp.replace("T", " ").slice(0, 19) : "";
+    html += `<tr><td>${t}</td><td>${e.symbol || ""}</td><td>${e.event_type}</td>` +
+            `<td class="side-${e.side || ''}">${(e.side || "").toUpperCase()}</td>` +
+            `<td>${e.price != null ? Number(e.price).toFixed(6) : "–"}</td>` +
+            `<td class="${pnlClass}">${pnlText}</td><td>${e.equity != null ? fmtMoney(e.equity) : "–"}</td></tr>`;
+  }
+  html += "</table>";
+  el.innerHTML = html;
+}
+
+function renderChart(curve) {
+  const ctx = document.getElementById("equityChart").getContext("2d");
+  const labels = curve.map(p => p.timestamp.replace("T", " ").slice(5, 16));
+  const data = curve.map(p => p.equity);
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update();
+    return;
+  }
+
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets: [{
+      label: "Equity", data, borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,0.08)",
+      fill: true, tension: 0.15, pointRadius: 0, borderWidth: 2,
+    }]},
+    options: {
+      responsive: true,
+      scales: {
+        x: { ticks: { color: "#8b93a1", maxTicksLimit: 8 }, grid: { color: "#262c35" } },
+        y: { ticks: { color: "#8b93a1" }, grid: { color: "#262c35" } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/data");
+    const d = await res.json();
+    renderStats(d);
+    renderOpenPositions(d.open_positions);
+    renderRecentEvents(d.recent_events);
+    renderChart(d.equity_curve);
+    document.getElementById("last-updated").textContent = "Last updated: " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("last-updated").textContent = "Connection lost — is live_bot.py running?";
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

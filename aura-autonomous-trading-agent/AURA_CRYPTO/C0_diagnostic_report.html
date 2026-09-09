@@ -1,0 +1,551 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AURA v0.5.0 — C0 Diagnostic Report</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;background:#0b1020;color:#e8edf7;margin:0}
+.wrap{max-width:1450px;margin:auto;padding:28px}
+.panel{background:#121a2d;border:1px solid #2b3956;border-radius:14px;padding:20px;margin:0 0 18px}
+h1{margin:0 0 8px} h2{font-size:18px}
+.sub,.note{color:#9aa8c1}
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.kpi{font-size:24px;font-weight:700;margin-top:5px}
+.label{font-size:11px;text-transform:uppercase;color:#9aa8c1;letter-spacing:.08em}
+table.data{border-collapse:collapse;width:100%;font-size:13px}
+table.data th,table.data td{border-bottom:1px solid #2b3956;padding:8px;text-align:left}
+table.data th{color:#9aa8c1}
+.empty{color:#9aa8c1}
+.warning{border:1px solid #7b6222;background:#2b2513;padding:12px;border-radius:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="panel">
+<div class="label">AURA CRYPTO RESEARCH</div>
+<h1>v0.5.0 C0 Diagnostic Report</h1>
+<div class="sub">Read-only analysis • no strategy changes • no orders</div>
+<p>Observation window: 2026-03-02 14:00:00+00:00 → 2026-08-19 00:00:00+00:00</p>
+</div>
+
+<div class="grid">
+<div class="panel"><div class="label">Trades</div><div class="kpi">109</div></div>
+<div class="panel"><div class="label">Gross Mean</div><div class="kpi">0.139%</div></div>
+<div class="panel"><div class="label">Net Mean</div><div class="kpi">0.116%</div></div>
+<div class="panel"><div class="label">Net Median</div><div class="kpi">-0.000%</div></div>
+<div class="panel"><div class="label">Win Rate</div><div class="kpi">49.541%</div></div>
+</div>
+
+<div class="panel">
+<h2>Interpretation Guardrail</h2>
+<div class="warning">
+This is a diagnostic layer, not an optimization layer. Hourly, symbol and funding differences
+are observations only. No filter or parameter should be selected from this report until the
+C0 horizon has been expanded and the hypothesis is independently validated.
+</div>
+</div>
+
+<div class="panel"><h2>MFE / MAE Percentiles</h2><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>metric</th>
+      <th>percentile</th>
+      <th>value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>mfe</td>
+      <td>0th</td>
+      <td>-0.0001954014232966</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>10th</td>
+      <td>0.00122198679603132</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>25th</td>
+      <td>0.0041149958882094</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>50th</td>
+      <td>0.008873719250604</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>75th</td>
+      <td>0.0141390531935861</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>90th</td>
+      <td>0.03421044948470721</td>
+    </tr>
+    <tr>
+      <td>mfe</td>
+      <td>100th</td>
+      <td>0.0810904487190307</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>0th</td>
+      <td>-0.0763744563404328</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>10th</td>
+      <td>-0.02354431234643086</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>25th</td>
+      <td>-0.0152085582668104</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>50th</td>
+      <td>-0.0072019031698585</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>75th</td>
+      <td>-0.0041189807936761</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>90th</td>
+      <td>-0.00210208255197158</td>
+    </tr>
+    <tr>
+      <td>mae</td>
+      <td>100th</td>
+      <td>-0.0009730282670888</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>0th</td>
+      <td>-0.0358714782293358</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>10th</td>
+      <td>-0.0166670014460024</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>25th</td>
+      <td>-0.007197700112481</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>50th</td>
+      <td>-1.4104471390825434e-06</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>75th</td>
+      <td>0.0056287700569088</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>90th</td>
+      <td>0.020266618846159743</td>
+    </tr>
+    <tr>
+      <td>net_return</td>
+      <td>100th</td>
+      <td>0.0685717252634663</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>0th</td>
+      <td>-94.17406917499012</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>10th</td>
+      <td>-5.913193335573824</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>25th</td>
+      <td>-1.2368029778658471</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>50th</td>
+      <td>0.004700906436442409</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>75th</td>
+      <td>0.489962636934151</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>90th</td>
+      <td>0.6926687383169335</td>
+    </tr>
+    <tr>
+      <td>mfe_capture_ratio</td>
+      <td>100th</td>
+      <td>0.9587107952942657</td>
+    </tr>
+  </tbody>
+</table></div>
+<div class="panel"><h2>Winners vs Losers</h2><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>result</th>
+      <th>trades</th>
+      <th>net_mean</th>
+      <th>net_median</th>
+      <th>mean_mfe</th>
+      <th>median_mfe</th>
+      <th>mean_mae</th>
+      <th>median_mae</th>
+      <th>mean_funding</th>
+      <th>mean_mfe_capture</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>LOSERS</td>
+      <td>55</td>
+      <td>-0.009682266604691805</td>
+      <td>-0.007197700112481</td>
+      <td>0.00590779180980518</td>
+      <td>0.0041149958882094</td>
+      <td>-0.01627450487030113</td>
+      <td>-0.0134898118461513</td>
+      <td>-1.8963636363636365e-05</td>
+      <td>-6.61521732376254</td>
+    </tr>
+    <tr>
+      <td>WINNERS</td>
+      <td>54</td>
+      <td>0.012206961785460456</td>
+      <td>0.0060212437722169</td>
+      <td>0.021476219553102045</td>
+      <td>0.01314155136337965</td>
+      <td>-0.006433698424043765</td>
+      <td>-0.00443958914466765</td>
+      <td>-2.8296296296296297e-05</td>
+      <td>0.46559905367345905</td>
+    </tr>
+  </tbody>
+</table></div>
+<div class="panel"><h2>Hourly Behavior (UTC)</h2><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>entry_hour_utc</th>
+      <th>trades</th>
+      <th>net_mean</th>
+      <th>net_median</th>
+      <th>win_rate</th>
+      <th>mean_mfe</th>
+      <th>mean_mae</th>
+      <th>mean_funding</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td>1</td>
+      <td>0.0396038552999625</td>
+      <td>0.0396038552999625</td>
+      <td>1.0</td>
+      <td>0.0499400913781193</td>
+      <td>-0.0041189807936761</td>
+      <td>0.000101</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>4</td>
+      <td>-0.013711468594800425</td>
+      <td>-0.013950637851637651</td>
+      <td>0.0</td>
+      <td>0.0026049493634911</td>
+      <td>-0.016265413160596574</td>
+      <td>-3.6e-05</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>6</td>
+      <td>-0.0010747268090899851</td>
+      <td>-0.0018455291702909552</td>
+      <td>0.5</td>
+      <td>0.012554003628370282</td>
+      <td>-0.010166504232963884</td>
+      <td>-4.1666666666666665e-05</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>1</td>
+      <td>-0.001607226922532</td>
+      <td>-0.001607226922532</td>
+      <td>0.0</td>
+      <td>0.0124899982742916</td>
+      <td>-0.0096585375704876</td>
+      <td>-2e-06</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>1</td>
+      <td>0.0029946101185608</td>
+      <td>0.0029946101185608</td>
+      <td>1.0</td>
+      <td>0.0053241345069143</td>
+      <td>-0.0012224313267704</td>
+      <td>-1e-06</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>2</td>
+      <td>0.0030024641386959495</td>
+      <td>0.0030024641386959495</td>
+      <td>1.0</td>
+      <td>0.00922845280511525</td>
+      <td>-0.0053118629042060005</td>
+      <td>-5.4499999999999997e-05</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>2</td>
+      <td>0.0231548552530039</td>
+      <td>0.0231548552530039</td>
+      <td>1.0</td>
+      <td>0.03127288339932905</td>
+      <td>-0.0078199948873029</td>
+      <td>-4e-06</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td>4</td>
+      <td>0.00611662188789355</td>
+      <td>0.0017783422162174999</td>
+      <td>0.75</td>
+      <td>0.0167812064786771</td>
+      <td>-0.0047261161318197745</td>
+      <td>-2.075e-05</td>
+    </tr>
+    <tr>
+      <td>11</td>
+      <td>3</td>
+      <td>-0.003924150076664167</td>
+      <td>0.0029592114974312</td>
+      <td>0.6666666666666666</td>
+      <td>0.0112223723782656</td>
+      <td>-0.0149578492694256</td>
+      <td>-4.4333333333333324e-05</td>
+    </tr>
+    <tr>
+      <td>12</td>
+      <td>8</td>
+      <td>-0.00986660692615855</td>
+      <td>-0.0047095882678832</td>
+      <td>0.375</td>
+      <td>0.007441961747763513</td>
+      <td>-0.02904884087151569</td>
+      <td>5e-06</td>
+    </tr>
+    <tr>
+      <td>13</td>
+      <td>9</td>
+      <td>0.0052696493762583</td>
+      <td>0.0034678184482372</td>
+      <td>0.5555555555555556</td>
+      <td>0.016563655049420922</td>
+      <td>-0.009811763755720156</td>
+      <td>1.2444444444444445e-05</td>
+    </tr>
+    <tr>
+      <td>14</td>
+      <td>12</td>
+      <td>0.006732989921028401</td>
+      <td>0.0025308046743563</td>
+      <td>0.5833333333333334</td>
+      <td>0.020469739778839615</td>
+      <td>-0.010025225376755134</td>
+      <td>-3.125e-05</td>
+    </tr>
+    <tr>
+      <td>15</td>
+      <td>13</td>
+      <td>0.0023958975121502702</td>
+      <td>-1.4104471390825434e-06</td>
+      <td>0.46153846153846156</td>
+      <td>0.0143574971331167</td>
+      <td>-0.008861047985754239</td>
+      <td>-3.446153846153847e-05</td>
+    </tr>
+    <tr>
+      <td>16</td>
+      <td>12</td>
+      <td>0.0012678898471038412</td>
+      <td>0.000205444521181</td>
+      <td>0.5</td>
+      <td>0.014952189713590717</td>
+      <td>-0.009569453675043542</td>
+      <td>-3.566666666666667e-05</td>
+    </tr>
+    <tr>
+      <td>17</td>
+      <td>4</td>
+      <td>-0.0026389828862306</td>
+      <td>-0.00124638942645815</td>
+      <td>0.25</td>
+      <td>0.007713520965362325</td>
+      <td>-0.005625690073076849</td>
+      <td>-3.625e-05</td>
+    </tr>
+    <tr>
+      <td>18</td>
+      <td>8</td>
+      <td>-0.002538542264356697</td>
+      <td>-0.0038926401565303</td>
+      <td>0.25</td>
+      <td>0.0073764433682097005</td>
+      <td>-0.010022486935454612</td>
+      <td>-4.7375e-05</td>
+    </tr>
+    <tr>
+      <td>19</td>
+      <td>1</td>
+      <td>-0.01680753874453</td>
+      <td>-0.01680753874453</td>
+      <td>0.0</td>
+      <td>0.0023994075189952</td>
+      <td>-0.0203837039613782</td>
+      <td>1.2e-05</td>
+    </tr>
+    <tr>
+      <td>20</td>
+      <td>6</td>
+      <td>0.012083693123978133</td>
+      <td>0.011253601561736298</td>
+      <td>0.8333333333333334</td>
+      <td>0.025697648655193084</td>
+      <td>-0.015692713172010115</td>
+      <td>-3.500000000000006e-06</td>
+    </tr>
+    <tr>
+      <td>21</td>
+      <td>3</td>
+      <td>-0.0019476851951289</td>
+      <td>-0.0005968599419148</td>
+      <td>0.3333333333333333</td>
+      <td>0.006430490594546</td>
+      <td>-0.014203461383866167</td>
+      <td>3.0000000000000005e-06</td>
+    </tr>
+    <tr>
+      <td>22</td>
+      <td>7</td>
+      <td>0.0005338379272009857</td>
+      <td>0.0013380011401558</td>
+      <td>0.5714285714285714</td>
+      <td>0.007881584452237328</td>
+      <td>-0.005440279033683686</td>
+      <td>-2.0571428571428573e-05</td>
+    </tr>
+    <tr>
+      <td>23</td>
+      <td>2</td>
+      <td>-0.01821489015379775</td>
+      <td>-0.01821489015379775</td>
+      <td>0.0</td>
+      <td>0.0040595236458664495</td>
+      <td>-0.02123688887424215</td>
+      <td>-8.75e-05</td>
+    </tr>
+  </tbody>
+</table></div>
+<div class="panel"><h2>Symbol Behavior</h2><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>symbol</th>
+      <th>trades</th>
+      <th>net_mean</th>
+      <th>net_median</th>
+      <th>win_rate</th>
+      <th>mean_mfe</th>
+      <th>mean_mae</th>
+      <th>mean_funding</th>
+      <th>mean_mfe_capture</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>ETH_USDT</td>
+      <td>54</td>
+      <td>0.002137401741808362</td>
+      <td>0.00088359304103785</td>
+      <td>0.5555555555555556</td>
+      <td>0.01629651004787785</td>
+      <td>-0.013025191281389946</td>
+      <td>-2.1907407407407407e-05</td>
+      <td>-3.429916735936477</td>
+    </tr>
+    <tr>
+      <td>BTC_USDT</td>
+      <td>55</td>
+      <td>0.00020421052907570534</td>
+      <td>-0.0005968599419148</td>
+      <td>0.43636363636363634</td>
+      <td>0.010993324778570755</td>
+      <td>-0.009802857337633966</td>
+      <td>-2.5236363636363636e-05</td>
+      <td>-2.7197015341526045</td>
+    </tr>
+  </tbody>
+</table></div>
+<div class="panel"><h2>Funding Diagnostics</h2><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>trades</th>
+      <th>funding_return_mean</th>
+      <th>funding_return_median</th>
+      <th>funding_rate_sum_mean</th>
+      <th>funding_rate_max_abs_mean</th>
+      <th>corr_funding_return_mae</th>
+      <th>corr_funding_return_net</th>
+      <th>corr_funding_rate_sum_mae</th>
+      <th>corr_funding_rate_sum_net</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>109</td>
+      <td>-2.3587155963302748e-05</td>
+      <td>-2.7e-05</td>
+      <td>2.3587155963302748e-05</td>
+      <td>4.6623853211009186e-05</td>
+      <td>-0.2651514496109941</td>
+      <td>-0.05467504777628984</td>
+      <td>0.2651514496109941</td>
+      <td>0.05467504777628984</td>
+    </tr>
+  </tbody>
+</table></div>
+<div class="panel">
+<h2>Current C0 Summary</h2>
+<table class="data">
+<tr><th>Gross mean</th><td>0.139%</td></tr>
+<tr><th>Net mean</th><td>0.116%</td></tr>
+<tr><th>Net median</th><td>-0.000%</td></tr>
+<tr><th>Win rate</th><td>49.541%</td></tr>
+<tr><th>Profit factor</th><td>1.238</td></tr>
+<tr><th>Mean MFE</th><td>1.362%</td></tr>
+<tr><th>Mean MAE</th><td>-1.140%</td></tr>
+<tr><th>MFE / MAE</th><td>1.195</td></tr>
+<tr><th>Funding ↔ MAE correlation</th><td>-0.265</td></tr>
+<tr><th>Funding ↔ Net return correlation</th><td>-0.055</td></tr>
+</table>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "config": {
+    "version": "AURA_v0.5.1",
+    "experiment": "C0_PATH_INSTRUMENTATION",
+    "signal_definition": "EMA3/EMA8 bullish crossover + MACD histogram > 0 + RelVol >= 1",
+    "hold_bars": 10,
+    "early_path_bars": [
+      1,
+      2,
+      3
+    ],
+    "fee_bps": 1.0,
+    "slippage_bps": 5.0,
+    "leverage": 1.0,
+    "execution": "NONE"
+  },
+  "source": "AURA_CRYPTO_C0_30D_20260826",
+  "output": "AURA_CRYPTO_V051_20260826",
+  "created_at": "2026-08-26T16:34:46.999797+00:00",
+  "research_status": "C0_INSTRUMENTED_C1_PATH_DATASET",
+  "execution": "NONE",
+  "oi_source": null,
+  "oi_status": "NOT_SUPPLIED",
+  "guardrails": [
+    "C0 signal definition unchanged.",
+    "Entry and 10H close exit unchanged.",
+    "No early-path threshold or exit rule is implemented.",
+    "OI is never synthesized or backfilled from current ticker data.",
+    "All OI joins are backward/as-of to prevent lookahead."
+  ],
+  "research_hypothesis": "H-C1-Path: early MFE/MAE may contain information about final C0 trade quality; this version records the path but does not act on it."
+}

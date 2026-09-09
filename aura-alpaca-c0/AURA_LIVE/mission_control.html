@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AURA v0.4.9 — Mission Control</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root {
+  --bg:#0b1020; --panel:#121a2d; --panel2:#18233b; --text:#e8edf7;
+  --muted:#9aa8c1; --line:#2b3956; --accent:#62a8ff; --good:#55d187;
+  --warn:#f3c969; --bad:#ff7070;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+header{padding:28px 34px;border-bottom:1px solid var(--line);background:#0d1426}
+h1{margin:0 0 8px;font-size:28px}
+h2{font-size:18px;margin:0 0 16px}
+.sub{color:var(--muted)}
+.wrap{max-width:1500px;margin:auto;padding:24px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+.kpi{font-size:25px;font-weight:700;margin-top:6px}
+.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:18px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+.muted{color:var(--muted);text-align:center}
+.warning{padding:12px;border:1px solid #6d5a25;background:#2a2412;color:#f5dc83;border-radius:10px;margin-bottom:18px}
+.badge{display:inline-block;padding:4px 8px;border-radius:99px;background:#173d2b;color:#79e0a1;font-size:12px}
+.chartbox{height:330px}
+.footer{color:var(--muted);font-size:12px;padding:12px 0 30px}
+@media(max-width:1000px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{padding:12px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="label">AURA QUANT RESEARCH PLATFORM</div>
+    <h1>v0.4.9 — Mission Control</h1>
+    <div class="sub">Read-only dashboard • v0.4.8 paper laboratory • NO ORDERS</div>
+  </div>
+</header>
+
+<main class="wrap">
+
+
+<div class="grid">
+  <div class="card"><div class="label">Frozen Universe</div><div class="kpi">101</div><div class="sub">S&P 100 securities</div></div>
+  <div class="card"><div class="label">Signals</div><div class="kpi">2</div><div class="sub">recorded in Signal Master</div></div>
+  <div class="card"><div class="label">Virtual Positions</div><div class="kpi">0</div><div class="sub">ledger rows</div></div>
+  <div class="card"><div class="label">Executions</div><div class="kpi">0</div><div class="sub">paper executions</div></div>
+</div>
+
+<div class="panel">
+<h2>Research Configuration</h2>
+<table>
+<tr><th>Signal</th><td>EMA3/EMA8 bullish crossover + MACD histogram &gt; 0 + RelVol ≥ 1</td></tr>
+<tr><th>Model A</th><td>10D TIME — close on the 10th complete trading session</td></tr>
+<tr><th>Model B</th><td>PURE ATR 2x/4x — 2× ATR stop / 4× ATR target, 60-session research horizon</td></tr>
+<tr><th>Model C</th><td>ATR 2x/4x + 10D CLOSE</td></tr>
+<tr><th>Friction</th><td>5 bp entry slippage + 1 bp commission + 5 bp exit slippage + 1 bp commission = 12 bp round trip</td></tr>
+<tr><th>Universe</th><td>S&amp;P100_FROZEN_2026-08-26_CORRECTED • frozen 2026-08-26</td></tr>
+<tr><th>Status</th><td><span class="badge">PAPER ONLY — NO ORDERS</span></td></tr>
+</table>
+</div>
+
+<div class="panel">
+<h2>Model Comparison</h2>
+<div style="overflow:auto">
+<table>
+<thead><tr>
+<th>Model</th><th>Closed</th><th>Open</th><th>Net Mean</th><th>Net Median</th>
+<th>Win Rate</th><th>Profit Factor</th><th>Max DD</th><th>Capital Efficiency</th>
+<th>MFE Capture</th><th>Net Lift vs Baseline</th>
+</tr></thead>
+<tbody><tr><td><b>A_10D_TIME</b></td><td>0</td><td>0</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td><b>B_PURE_ATR_2x4x</b></td><td>0</td><td>0</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td><b>C_ATR_2x4x_10D</b></td><td>0</td><td>0</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr></tbody>
+</table>
+</div>
+</div>
+
+<div class="panel">
+<h2>Paper Equity Curves</h2>
+<div class="chartbox"><canvas id="equity"></canvas></div>
+</div>
+
+<div class="panel">
+<h2>Open / Pending Virtual Positions</h2>
+<div style="overflow:auto">
+<table>
+<thead><tr><th>Signal ID</th><th>Model</th><th>Symbol</th><th>Entry Date</th>
+<th>Entry</th><th>Stop</th><th>Target</th><th>MFE</th><th>MAE</th></tr></thead>
+<tbody><tr><td colspan="9" class="muted">No open virtual positions.</td></tr></tbody>
+</table>
+</div>
+</div>
+
+<div class="panel">
+<h2>Recent Signal Master Events</h2>
+<div style="overflow:auto">
+<table>
+<thead><tr><th>Signal ID</th><th>Symbol</th><th>Decision Date</th><th>Entry Date</th>
+<th>Signal Close</th><th>EMA3</th><th>RelVol</th></tr></thead>
+<tbody><tr><td>AURA-2026-08-26-UPS-0002</td><td>UPS</td><td>2026-08-25T04:00:00+00:00</td><td>nan</td><td>105.13</td><td>103.83</td><td>1.53</td></tr>
+<tr><td>AURA-2026-08-26-GS-0001</td><td>GS</td><td>2026-08-25T04:00:00+00:00</td><td>nan</td><td>1058.68</td><td>1045.54</td><td>1.61</td></tr></tbody>
+</table>
+</div>
+</div>
+
+<div class="panel">
+<h2>Research Guardrails</h2>
+<ul>
+<li>Mission Control is read-only.</li>
+<li>The Signal Master remains the single source of truth for A/B/C comparison.</li>
+<li>No sector filter, indicator threshold, ATR multiplier, or exit parameter is optimized here.</li>
+<li>Model B remains a 60-session research horizon; this dashboard does not alter it.</li>
+<li>All three models receive the same signal and therefore differ only by exit philosophy.</li>
+<li>Paper trading data must remain separate from historical training/holdout data.</li>
+</ul>
+</div>
+
+<div class="footer">
+Generated 2026-08-26 14:45:06 UTC. AURA v0.4.9 Mission Control is an analytics layer only.
+</div>
+</main>
+
+<script>
+const equityLabels=[]; const equitySeries={};
+const ctx=document.getElementById('equity').getContext('2d');
+const datasets=Object.keys(equitySeries).map(model => ({
+  label:model, data:equitySeries[model], tension:.2, fill:false
+}));
+new Chart(ctx,{
+  type:'line',
+  data:{labels:equityLabels,datasets},
+  options:{
+    responsive:true, maintainAspectRatio:false,
+    interaction:{mode:'index',intersect:false},
+    plugins:{legend:{labels:{color:'#e8edf7'}}},
+    scales:{x:{ticks:{color:'#9aa8c1'}},y:{ticks:{color:'#9aa8c1',callback:v=>v+'%'}}}
+  }
+});
+</script>
+</body>
+</html>

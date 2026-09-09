@@ -1,0 +1,3 @@
+validation_type,selected_filter,eligible_test_periods,test_periods,total_test_signals,mean_lift_vs_raw,median_lift_vs_raw,positive_rate_lift_vs_raw,periods_positive_median_lift,periods_positive_mean_lift,periods_positive_rate_lift,robustness_score,robust
+FROZEN_MULTI_PERIOD,PERSISTENCE_3,3,3,201,-0.003193822044214612,-0.005029406106335325,-0.04481528033815618,0,0,0,-0.012435905734063283,False
+EXPANDING_WALK_FORWARD,PER_PERIOD_SELECTION,3,3,123,-0.002550228602064944,-0.0029602285624726887,-0.018578629832499804,1,0,1,-0.005960908828355789,False

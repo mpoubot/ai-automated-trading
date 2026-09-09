@@ -1,0 +1,105 @@
+{
+  "mexc": {
+    "base_url": "https://api.mexc.com",
+    "depth_levels": 100,
+    "request_timeout_seconds": 10,
+    "user_agent": "asset-selection-experiment-v1"
+  },
+  "coingecko": {
+    "enabled": true,
+    "base_url": "https://api.coingecko.com/api/v3",
+    "markets_per_page": 250,
+    "max_pages": 4,
+    "cache_minutes": 30,
+    "request_timeout_seconds": 10
+  },
+  "execution": {
+    "maker_fee_pct": 0.06,
+    "taker_fee_pct": 0.08,
+    "default_fee_pct_per_side": 0.08,
+    "default_execution_side": "taker",
+    "slippage_buffer_bps": 5
+  },
+  "buckets": {
+    "market_cap_rank": {
+      "TOP_50": [
+        1,
+        50
+      ],
+      "RANK_51_100": [
+        51,
+        100
+      ],
+      "RANK_101_200": [
+        101,
+        200
+      ],
+      "RANK_201_500": [
+        201,
+        500
+      ],
+      "RANK_501_PLUS": [
+        501,
+        1000000
+      ],
+      "UNKNOWN": [
+        0,
+        0
+      ]
+    },
+    "volume_usd_24h": {
+      "A_OVER_50M": [
+        50000000,
+        1e+30
+      ],
+      "B_10M_50M": [
+        10000000,
+        50000000
+      ],
+      "C_1M_10M": [
+        1000000,
+        10000000
+      ],
+      "D_UNDER_1M": [
+        0,
+        1000000
+      ],
+      "UNKNOWN": [
+        -1,
+        -1
+      ]
+    },
+    "spread_bps": {
+      "EXCELLENT_LT_5": [
+        0,
+        5
+      ],
+      "GOOD_5_15": [
+        5,
+        15
+      ],
+      "MODERATE_15_30": [
+        15,
+        30
+      ],
+      "POOR_30_100": [
+        30,
+        100
+      ],
+      "DANGEROUS_GT_100": [
+        100,
+        1000000000.0
+      ],
+      "UNKNOWN": [
+        -1,
+        -1
+      ]
+    }
+  },
+  "research": {
+    "candidate_signal_repeat_window_minutes": 120,
+    "reversal_window_minutes": 240,
+    "min_completed_trades_for_decision": 100,
+    "ambiguous_trade_policy": "exclude"
+  }
+}

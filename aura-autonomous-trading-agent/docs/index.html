@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AURA Paper-Chain Status</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1200px;margin:35px auto;padding:0 20px;background:#0b1020;color:#eef2ff}
+a{color:#8ab4ff}
+.card{background:#151c30;border:1px solid #2b3655;border-radius:14px;padding:20px;margin:16px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.metric{font-size:22px;font-weight:700}
+.label{font-size:12px;color:#9aa8c7;text-transform:uppercase;letter-spacing:.06em}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 9px;border-bottom:1px solid #29334f;text-align:left;font-size:14px}
+td.label{color:#9aa8c7;width:45%}
+.badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:600}
+.badge.safe{background:#123424;color:#86efac}
+.badge.warn{background:#3a2c10;color:#fbbf24}
+.badge.neutral{background:#263451;color:#cbd5e1}
+</style></head>
+<body>
+<p><a href="https://github.com/mpoubot/aura-autonomous-trading-agent">← AURA repository</a></p>
+<h1>AURA Paper-Chain Status</h1>
+<p>v0.5.3 chain • Alpaca crypto (BTC/USD, ETH/USD) • PAPER account • <span class="badge safe">NO LIVE EXECUTION</span></p>
+
+
+<div class="card"><h2>Live test status</h2><p class="warn">No runtime cycle has been published yet. Once aura_v05321_alpaca_paper_runtime.py runs (via the GitHub Actions workflow or locally), this dashboard will report real signal, safety, and execution-specification state per cycle.</p></div>
+
+
+<div class="card"><h2>Safety boundaries (unchanged by this dashboard)</h2>
+<ul>
+<li>.19 Execution Safety hard-codes execution_authorized = False on every run (research-only), untouched here.</li>
+<li>.23's direction allowlists are empty by default. BEAR never maps to SELL. See
+<a href="https://github.com/mpoubot/aura-autonomous-trading-agent/blob/paper/runtime-alpaca-2026-09-01/docs/AURA_V0531622_EXECUTION_SPECIFICATION_BRIDGE_2026-09-02.md">the contract writeup</a>.</li>
+<li>Quantity is never fabricated. Without an explicit --sizing-config, every symbol fails closed (MISSING_QUANTITY_SOURCE).</li>
+<li>This page only reads and renders already-published JSON. It has no ability to place an order.</li>
+</ul></div>
+
+<div class="card"><h2>Recent cycles</h2>
+<table><tr><th>Cycle</th><th>Safety verdict</th><th>Kill switch</th><th>Execution spec</th></tr>
+<tr><td colspan="4">No cycles recorded yet.</td></tr>
+</table></div>
+
+<p style="color:#6b7896;font-size:12px">Generated 2026-09-02T18:16:35.407992+00:00 by scripts/generate_status_dashboard.py</p>
+</body></html>

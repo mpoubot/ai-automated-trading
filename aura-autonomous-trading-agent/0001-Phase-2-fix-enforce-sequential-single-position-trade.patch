@@ -1,0 +1,305 @@
+From 0e1552d7cb42007577dde03d02ae37bf51750f23 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 4 Sep 2026 10:51:53 +0000
+Subject: [PATCH] Phase 2 fix: enforce sequential single-position trades in
+ exit-policy backtest
+
+Martin flagged that the exit-policy backtest counted an entry episode as a
+new trade even while a previously simulated trade (for the same symbol/
+candidate) was still open -- entries are detected purely from the regime
+condition re-firing, with no gating on whether a prior trade had actually
+closed. Since trades can hold up to --max-hold-hours (default 240h), this
+meant the backtest could effectively simulate multiple concurrent positions
+in the same instrument, which no real single-position account could ever
+hold. It also explained why trade_summary's cumulative max-drawdown numbers
+looked implausibly large: they summed per-trade returns in entry order as
+if each trade sequentially added to one account curve, which isn't valid
+when trades overlap in time.
+
+Fix: simulate_trades_for_entries now walks entries in chronological order
+and skips (drops, does not defer) any entry that fires before the
+previously-taken trade's own exit_ts, evaluated independently per policy in
+the grid since a wider trailing stop holds a position open longer than a
+tighter one. simulate_trade now returns the trade's exit_ts (the bar where
+STOP/TARGET fired, or the last bar for TIMEOUT/NO_DATA_AFTER_ENTRY) to make
+this possible. Every result row, walk-forward fold, and the report.txt
+per-row summary line now report entries_skipped_overlap / entries_total so
+the skip rate is always visible rather than silently lowering trade counts.
+
+4 new tests cover the gating directly (skip while open, take after close,
+resume correctly after a skip, and that skip count is computed per-policy
+since hold duration differs by policy). All 25 previously-existing tests
+in this file still pass unmodified -- this only changes trade counts when
+entries actually overlap in time, not the per-trade simulation logic.
+
+Research only, no live/paper execution touched -- same invariants as the
+original Phase 2 patch (.19/.22/.23 live execution path untouched,
+VALIDATED_LONG_ENTRY_REGIME_LABELS / VALIDATED_SHORT_ENTRY_REGIME_LABELS
+remain frozenset()).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_exit_policy_backtest.py            | 74 +++++++++++++++++++----
+ tests/test_aura_exit_policy_backtest.py | 78 +++++++++++++++++++++++++
+ 2 files changed, 141 insertions(+), 11 deletions(-)
+
+diff --git a/aura_exit_policy_backtest.py b/aura_exit_policy_backtest.py
+index 23922a0..62d2d25 100644
+--- a/aura_exit_policy_backtest.py
++++ b/aura_exit_policy_backtest.py
+@@ -74,6 +74,18 @@ the bar immediately after entry:
+     policy that rarely resolves isn't silently treated as "working".
+   - A flat round-trip cost (--cost-bps, default 10bps, same convention as
+     v2) is subtracted from every trade's gross return.
++  - SEQUENTIAL, SINGLE-POSITION ACCOUNT (added after Martin's review of the
++    first real run): an entry episode that fires while a trade already
++    opened under the SAME policy is still open (per that policy's own
++    trailing-stop/take-profit/timeout resolution) is skipped, not stacked
++    into a second simulated concurrent position. This matches how a real
++    account actually behaves -- one position per symbol/candidate at a
++    time -- and is evaluated separately for every policy in the grid, since
++    a wider trailing stop holds trades open longer and therefore skips more
++    overlapping entries than a tighter one. Every result row reports
++    test_entries_skipped_overlap / test_entries_total (and the equivalent
++    train-side and per-walk-forward-fold counts) so the skip rate is always
++    visible rather than silently lowering the trade count.
+ 
+ Policy search / validation discipline (mirrors v2 exactly, applied to
+ policy choice instead of ATR threshold choice)
+@@ -268,12 +280,18 @@ def simulate_trade(
+             "net_return_pct": None,
+             "mfe_pct": None,
+             "mae_pct": None,
++            # No future bars exist at all after this entry (end of the
++            # fetched series) -- exit_ts falls back to entry_ts so this
++            # trade can never block a later entry from being simulated,
++            # matching the fact that there is nothing left to block.
++            "exit_ts": entry_ts,
+         }
+ 
+     running_extreme = entry_price
+     worst_excursion = entry_price
+     exit_reason: str | None = None
+     exit_price: float | None = None
++    exit_ts: pd.Timestamp | None = None
+     bars_held = 0
+ 
+     for _, bar in post.iterrows():
+@@ -290,9 +308,9 @@ def simulate_trade(
+             target_hit = target_level is not None and bar["low"] <= target_level
+ 
+         if stop_hit:
+-            exit_reason, exit_price = "STOP", stop_level  # conservative: stop wins a same-bar collision
++            exit_reason, exit_price, exit_ts = "STOP", stop_level, bar["timestamp"]  # conservative: stop wins a same-bar collision
+         elif target_hit:
+-            exit_reason, exit_price = "TARGET", target_level
++            exit_reason, exit_price, exit_ts = "TARGET", target_level, bar["timestamp"]
+ 
+         if direction == "LONG":
+             worst_excursion = min(worst_excursion, bar["low"])
+@@ -307,6 +325,7 @@ def simulate_trade(
+     if exit_reason is None:
+         exit_reason = "TIMEOUT"
+         exit_price = float(post.iloc[-1]["close"])
++        exit_ts = post.iloc[-1]["timestamp"]
+ 
+     if direction == "LONG":
+         gross_return_pct = 100.0 * (exit_price / entry_price - 1.0)
+@@ -324,6 +343,7 @@ def simulate_trade(
+         "net_return_pct": gross_return_pct - cost_pct,
+         "mfe_pct": mfe_pct,
+         "mae_pct": mae_pct,
++        "exit_ts": exit_ts,
+     }
+ 
+ 
+@@ -348,13 +368,38 @@ def simulate_trades_for_entries(
+     policy: tuple[float, float | None],
+     max_hold_bars: int,
+     cost_pct: float,
+-) -> pd.DataFrame:
++) -> tuple[pd.DataFrame, int]:
++    """Simulate trades for a SEQUENTIAL, single-position account: an entry
++    episode that fires while a trade already opened under this policy is
++    still running (per this policy's own trailing-stop/take-profit/timeout
++    resolution) is skipped, not stacked into a second concurrent trade --
++    matching the fact that AURA (and any real account) can only hold one
++    position per symbol/candidate at a time. Without this, an entry episode
++    that re-fires while a long-held prior trade is still open would be
++    double-counted as if two independent positions were open simultaneously,
++    which inflates trade counts and makes the aggregate trade-return curve
++    (trade_summary's cumulative drawdown in particular) not correspond to
++    anything a real account could have produced.
++
++    A skipped entry is dropped entirely (not deferred to a later price) --
++    the next trade taken is simply the next entry episode whose timestamp is
++    at/after the prior trade's exit_ts, exactly as already detected by
++    build_entries. Returns (trades, n_entries_skipped_overlap) so the skip
++    rate is always visible in results, never silently absorbed into a lower
++    trade count."""
+     ts, tp = policy
+-    rows = [
+-        simulate_trade(g_full, row["timestamp"], float(row["close"]), direction, ts, tp, max_hold_bars, cost_pct)
+-        for _, row in entries.iterrows()
+-    ]
+-    return pd.DataFrame(rows)
++    rows: list[dict[str, Any]] = []
++    skipped = 0
++    blocked_until: pd.Timestamp | None = None
++    for _, row in entries.sort_values("timestamp").iterrows():
++        entry_ts = row["timestamp"]
++        if blocked_until is not None and entry_ts < blocked_until:
++            skipped += 1
++            continue
++        trade = simulate_trade(g_full, entry_ts, float(row["close"]), direction, ts, tp, max_hold_bars, cost_pct)
++        rows.append(trade)
++        blocked_until = trade.get("exit_ts", entry_ts)
++    return pd.DataFrame(rows), skipped
+ 
+ 
+ def trade_summary(trades: pd.DataFrame) -> dict[str, Any]:
+@@ -405,10 +450,11 @@ def search_best_policy(
+ 
+     best_policy, best_summary = None, None
+     for policy in grid:
+-        trades = simulate_trades_for_entries(g_full, train_entries, direction, policy, max_hold_bars, cost_pct)
++        trades, skipped = simulate_trades_for_entries(g_full, train_entries, direction, policy, max_hold_bars, cost_pct)
+         summary = trade_summary(trades)
+         if summary["n_trades"] < MIN_TRAIN_TRADES_FOR_SEARCH or summary["mean_net_return_pct"] is None:
+             continue
++        summary["entries_skipped_overlap"] = skipped
+         if best_summary is None or summary["mean_net_return_pct"] > best_summary["mean_net_return_pct"]:
+             best_policy, best_summary = policy, summary
+ 
+@@ -447,11 +493,13 @@ def walk_forward_policy(
+ 
+         fold["chosen_policy"] = policy_id(chosen)
+         fold["train_trades"] = chosen_summary["n_trades"]
++        fold["train_entries_skipped_overlap"] = chosen_summary.get("entries_skipped_overlap")
+ 
+         fold_test_entries = build_entries(test_g, candidate, FROZEN_ATR_THRESHOLD_PCT)
+-        test_trades = simulate_trades_for_entries(g_full, fold_test_entries, direction, chosen, max_hold_bars, cost_pct)
++        test_trades, test_skipped = simulate_trades_for_entries(g_full, fold_test_entries, direction, chosen, max_hold_bars, cost_pct)
+         test_summary = trade_summary(test_trades)
+         fold["test_trades"] = test_summary["n_trades"]
++        fold["test_entries_skipped_overlap"] = test_skipped
+         fold["test_mean_net_return_pct"] = test_summary["mean_net_return_pct"]
+ 
+         if test_summary["n_trades"] >= MIN_TEST_TRADES_WALKFORWARD and test_summary["mean_net_return_pct"] is not None:
+@@ -510,11 +558,14 @@ def backtest_symbol_candidate(
+     result["chosen_trailing_stop_pct"], result["chosen_take_profit_pct"] = chosen
+     result["train_trades"] = chosen_train_summary["n_trades"]
+     result["train_mean_net_return_pct"] = chosen_train_summary["mean_net_return_pct"]
++    result["train_entries_skipped_overlap"] = chosen_train_summary.get("entries_skipped_overlap")
+ 
+-    test_trades = simulate_trades_for_entries(g_full, test_entries, direction, chosen, max_hold_hours, cost_pct)
++    test_trades, test_entries_skipped_overlap = simulate_trades_for_entries(g_full, test_entries, direction, chosen, max_hold_hours, cost_pct)
+     test_summary = trade_summary(test_trades)
+     for key, value in test_summary.items():
+         result[f"test_{key}"] = value
++    result["test_entries_total"] = int(len(test_entries))
++    result["test_entries_skipped_overlap"] = test_entries_skipped_overlap
+ 
+     baseline_col = f"fwd_{BASELINE_HORIZON_HOURS}h"
+     baseline_vals = test_entries[baseline_col].dropna().to_numpy(dtype=float) - cost_pct if len(test_entries) else np.array([])
+@@ -756,6 +807,7 @@ def main() -> int:
+                             f" max_dd={row.get('test_max_drawdown_pct')}"
+                             f" bootstrap_p_positive={row.get('bootstrap_p_positive')}"
+                             f" walkforward={row.get('walkforward_folds_positive')}/{row.get('walkforward_folds_considered')}"
++                            f" entries_skipped_overlap={row.get('test_entries_skipped_overlap')}/{row.get('test_entries_total')}"
+                         )
+                     f.write(f"  {row['symbol']} {row['candidate']} ({row['direction']}): {row.get('reason', '')}{extra}\n")
+                 f.write("\n")
+diff --git a/tests/test_aura_exit_policy_backtest.py b/tests/test_aura_exit_policy_backtest.py
+index 39f96de..6351601 100644
+--- a/tests/test_aura_exit_policy_backtest.py
++++ b/tests/test_aura_exit_policy_backtest.py
+@@ -154,6 +154,84 @@ def test_short_profitable_when_price_falls():
+     assert result["gross_return_pct"] > 0  # short profits when price fell
+ 
+ 
++# ------------------------------------------------------------------------
++# simulate_trades_for_entries: sequential, single-position account -- an
++# entry that fires while a previous trade under the same policy is still
++# open must be skipped, not stacked into a second concurrent trade.
++# ------------------------------------------------------------------------
++
++def test_simulate_trades_for_entries_skips_entry_while_prior_trade_still_open():
++    # A flat, never-moving series: with a wide trailing stop and no
++    # take-profit, the first trade only resolves via TIMEOUT after
++    # max_hold_bars=20. A second entry fired at hour=5 (well inside that
++    # window) must be skipped -- only one trade should come out.
++    bars = [{"open": 100, "high": 100.1, "low": 99.9, "close": 100} for _ in range(40)]
++    g_full = make_bars(bars)
++    entries = pd.DataFrame([
++        {"timestamp": g_full.iloc[0]["timestamp"], "close": 100.0},   # hour 0 -- opens a trade held to hour 20
++        {"timestamp": g_full.iloc[5]["timestamp"], "close": 100.0},   # hour 5 -- still inside the open trade, must be skipped
++    ])
++    trades, skipped = epb.simulate_trades_for_entries(g_full, entries, "LONG", (50.0, None), max_hold_bars=20, cost_pct=0.0)
++    assert len(trades) == 1
++    assert skipped == 1
++    assert trades.iloc[0]["exit_reason"] == "TIMEOUT"
++
++
++def test_simulate_trades_for_entries_takes_entry_after_prior_trade_closes():
++    # Same shape, but the second entry fires at hour=25 -- after the first
++    # trade (held to hour 20) has already closed -- so both should be taken.
++    bars = [{"open": 100, "high": 100.1, "low": 99.9, "close": 100} for _ in range(40)]
++    g_full = make_bars(bars)
++    entries = pd.DataFrame([
++        {"timestamp": g_full.iloc[0]["timestamp"], "close": 100.0},    # hour 0 -- closes (TIMEOUT) at hour 20
++        {"timestamp": g_full.iloc[25]["timestamp"], "close": 100.0},   # hour 25 -- after the first trade closed
++    ])
++    trades, skipped = epb.simulate_trades_for_entries(g_full, entries, "LONG", (50.0, None), max_hold_bars=20, cost_pct=0.0)
++    assert len(trades) == 2
++    assert skipped == 0
++
++
++def test_simulate_trades_for_entries_takes_third_entry_after_first_closes_skips_middle():
++    # Three entries: #2 fires while #1 is still open (skipped), #3 fires
++    # after #1 has closed (taken) -- confirms gating resumes correctly
++    # rather than staying blocked forever after the first skip.
++    bars = [{"open": 100, "high": 100.1, "low": 99.9, "close": 100} for _ in range(40)]
++    g_full = make_bars(bars)
++    entries = pd.DataFrame([
++        {"timestamp": g_full.iloc[0]["timestamp"], "close": 100.0},    # hour 0 -- closes (TIMEOUT) at hour 20
++        {"timestamp": g_full.iloc[5]["timestamp"], "close": 100.0},    # hour 5 -- skipped, #1 still open
++        {"timestamp": g_full.iloc[25]["timestamp"], "close": 100.0},   # hour 25 -- taken, #1 already closed
++    ])
++    trades, skipped = epb.simulate_trades_for_entries(g_full, entries, "LONG", (50.0, None), max_hold_bars=20, cost_pct=0.0)
++    assert len(trades) == 2
++    assert skipped == 1
++
++
++def test_simulate_trades_for_entries_a_tighter_stop_skips_fewer_overlapping_entries():
++    # A trade that resolves quickly (tight stop, sharp adverse move) frees
++    # up the account sooner than a trade that only times out -- so the
++    # SAME entries under a tight stop should skip no more (usually fewer)
++    # overlapping entries than under a wide trail-only stop that has to run
++    # to the max-hold cap. This is why the skip count must be computed per
++    # policy, not once for the whole entry list.
++    bars = []
++    for h in range(40):
++        if h == 1:
++            bars.append({"open": 100, "high": 100, "low": 90, "close": 91})  # sharp drop -> tight stop fires fast
++        else:
++            bars.append({"open": 100, "high": 100.1, "low": 99.9, "close": 100})
++    g_full = make_bars(bars)
++    entries = pd.DataFrame([
++        {"timestamp": g_full.iloc[0]["timestamp"], "close": 100.0},
++        {"timestamp": g_full.iloc[5]["timestamp"], "close": 100.0},
++    ])
++    tight_trades, tight_skipped = epb.simulate_trades_for_entries(g_full, entries, "LONG", (1.0, None), max_hold_bars=20, cost_pct=0.0)
++    wide_trades, wide_skipped = epb.simulate_trades_for_entries(g_full, entries, "LONG", (50.0, None), max_hold_bars=20, cost_pct=0.0)
++    assert tight_trades.iloc[0]["exit_reason"] == "STOP"
++    assert tight_skipped == 0  # the hour-5 entry fires after the hour-0 trade already stopped out on the hour-1 drop
++    assert wide_skipped == 1   # the wide trail-only stop is still open at hour 5, so that entry is skipped
++
++
+ # ------------------------------------------------------------------------
+ # build_entries: FROZEN vs MIRROR, direction correctness, ATR threshold.
+ # ------------------------------------------------------------------------
+-- 
+2.43.0
+

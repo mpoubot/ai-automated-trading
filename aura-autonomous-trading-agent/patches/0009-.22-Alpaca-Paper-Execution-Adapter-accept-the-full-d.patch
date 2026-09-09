@@ -1,0 +1,118 @@
+From 5bff849171a9bb5d0c332bd25e600e80d048f7c1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 18:20:01 +0000
+Subject: [PATCH 09/10] .22 Alpaca Paper Execution Adapter: accept the full
+ discovered coin universe
+
+This is the actual order-submission allowlist gate, so this change is
+called out separately from the .13-.19/.23 report-layer changes: it
+directly affects what this adapter will submit to Alpaca's paper API.
+
+Replaces the fixed {"BTC/USD", "ETH/USD"} REQUIRED_SYMBOLS allowlist in
+validate_spec() with SUPPORTED_SYMBOL_PATTERN, a structural check
+(^[A-Z0-9]{2,10}/USD$) matching the exact same USD-quoted-pair shape
+already validated by aura_v05321_alpaca_market_data.py's
+discover_crypto_universe() (_USD_PAIR_RE) elsewhere in this codebase, so
+this adapter now accepts the same discovered universe upstream can
+actually produce a signal for -- not an unbounded "any string" symbol.
+This adapter does not call Alpaca's own Assets API itself (it stays an
+isolated, side-effect-free-by-default validator); Alpaca's order-
+submission API remains the final live authority on whether a given
+symbol is actually tradable, exactly as it already was for BTC/USD and
+ETH/USD.
+
+No other safety gate changes: kill_switch, execution_authorized,
+paper_execution_authorized, live_execution, quantity, and client_order_id
+validation are all untouched. TradingClient(..., paper=True) remains
+mandatory and no live endpoint exists in this module.
+
+The explicitly-superseded aura_v05322_alpaca_paper_execution.py draft
+(marked SUPERSEDED in its own docstring, "kept as-is, still passing, for
+history/reference") is deliberately left untouched.
+
+Adds 4 cases to the existing subprocess-based contract test: a discovered
+symbol beyond BTC/ETH (AVAX/USD) now validates, while a malformed symbol
+and a non-USD-quoted pair still fail closed. All 11 cases in that file
+pass. Full pytest suite (81 tests) green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05322_alpaca_paper_execution_adapter.py  | 17 +++++++++++++++--
+ ...5322_alpaca_paper_execution_adapter_test.py | 18 +++++++++++++++++-
+ 2 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/aura_v05322_alpaca_paper_execution_adapter.py b/aura_v05322_alpaca_paper_execution_adapter.py
+index e8e17ce..96ce0b3 100644
+--- a/aura_v05322_alpaca_paper_execution_adapter.py
++++ b/aura_v05322_alpaca_paper_execution_adapter.py
+@@ -23,6 +23,7 @@ from __future__ import annotations
+ import argparse
+ import json
+ import os
++import re
+ import uuid
+ from datetime import datetime, timezone
+ from decimal import Decimal, InvalidOperation
+@@ -34,7 +35,19 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+ 
+ 
+ VERSION = "AURA v0.5.3.22"
+-REQUIRED_SYMBOLS = {"BTC/USD", "ETH/USD"}
++
++# Any well-formed USD-quoted crypto pair is accepted here -- the same
++# discovered-universe shape already validated in
++# aura_v05321_alpaca_market_data.py's discover_crypto_universe() (its own
++# _USD_PAIR_RE). This adapter is deliberately isolated and does not call
++# Alpaca's Assets API itself; it validates the SHAPE of the symbol, and
++# Alpaca's own order-submission API remains the final authority on whether
++# a given symbol is actually tradable -- exactly as it already is today for
++# BTC/USD and ETH/USD. This deliberately replaces the old fixed
++# {"BTC/USD", "ETH/USD"} allowlist so the full discovered coin universe can
++# reach submission; it is not a change to any other safety gate below
++# (kill switch, execution_authorized, quantity, client_order_id).
++SUPPORTED_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,10}/USD$")
+ 
+ 
+ def now() -> str:
+@@ -79,7 +92,7 @@ def validate_spec(spec: dict) -> dict:
+         fail("PAPER_EXECUTION_NOT_AUTHORIZED")
+ 
+     symbol = spec.get("symbol")
+-    if symbol not in REQUIRED_SYMBOLS:
++    if not isinstance(symbol, str) or not SUPPORTED_SYMBOL_PATTERN.match(symbol):
+         fail(f"UNSUPPORTED_SYMBOL:{symbol}")
+ 
+     side = spec.get("side")
+diff --git a/tests/aura_v05322_alpaca_paper_execution_adapter_test.py b/tests/aura_v05322_alpaca_paper_execution_adapter_test.py
+index 17208bb..9cc47bc 100644
+--- a/tests/aura_v05322_alpaca_paper_execution_adapter_test.py
++++ b/tests/aura_v05322_alpaca_paper_execution_adapter_test.py
+@@ -72,7 +72,23 @@ def main() -> int:
+     rc, result = run(bad)
+     expect("live_execution=true blocks", rc != 0 and result["status"] == "FAIL_CLOSED")
+ 
+-    print("AURA v0.5.3.22 CONTRACT: 6/6 PASS")
++    # All-coin-universe: any well-formed USD-quoted crypto pair validates,
++    # not just the original fixed BTC/USD, ETH/USD pair -- this is the
++    # actual order-submission allowlist, so it is tested directly here.
++    good = dict(BASE, symbol="AVAX/USD", client_order_id="aura-test-05322-002")
++    rc, result = run(good)
++    expect("a discovered symbol beyond BTC/ETH validates", rc == 0 and result["status"] == "VALIDATED_NO_SUBMISSION")
++    expect("validated symbol echoed back", result["symbol"] == "AVAX/USD")
++
++    bad = dict(BASE, symbol="NOT-A-SYMBOL")
++    rc, result = run(bad)
++    expect("a malformed symbol still fails closed", rc != 0 and result["status"] == "FAIL_CLOSED")
++
++    bad = dict(BASE, symbol="BTC/EUR")
++    rc, result = run(bad)
++    expect("a non-USD-quoted pair still fails closed", rc != 0 and result["status"] == "FAIL_CLOSED")
++
++    print("AURA v0.5.3.22 CONTRACT: 11/11 PASS")
+     return 0
+ 
+ 
+-- 
+2.43.0
+

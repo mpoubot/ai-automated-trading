@@ -1,0 +1,30 @@
+{
+  "engine": "AURA v0.5.1.1",
+  "mode": "RESEARCH ONLY \u2014 NO STRATEGY CHANGE \u2014 NO ORDERS",
+  "input": "AURA_CRYPTO_V051_FULL_20260826\\early_path_diagnostics.csv",
+  "trades_total": 55,
+  "completed_nonflat_trades": 55,
+  "winners": 29,
+  "losers": 26,
+  "symbols": [
+    "BTC_USDT",
+    "ETH_USDT"
+  ],
+  "fixed_thresholds": [
+    -0.005,
+    -0.01,
+    -0.015,
+    -0.02,
+    -0.025
+  ],
+  "percentiles": [
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    0.9
+  ],
+  "guardrail": "Thresholds are descriptive diagnostics only; no threshold is selected.",
+  "top_pearson": "bar_3_close_return_before_costs",
+  "top_pearson_r": 0.5199834532489768
+}

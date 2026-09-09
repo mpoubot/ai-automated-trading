@@ -1,0 +1,4 @@
+model,closed_trades,open_positions,net_mean,net_median,win_rate,profit_factor,max_drawdown,capital_efficiency,mfe_capture_ratio,net_lift_vs_baseline
+A_10D_TIME,0,0,,,,,,,,
+B_PURE_ATR_2x4x,0,0,,,,,,,,
+C_ATR_2x4x_10D,0,0,,,,,,,,

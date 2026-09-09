@@ -1,0 +1,486 @@
+From 5aac2f7fca91eeb64acf72ef2efa416669d24acc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 14:45:49 +0000
+Subject: [PATCH 01/10] .13 Signal Decision Engine: recognize mirrored short
+ candidate, support full coin universe
+
+Recognizes both FROZEN_CANDIDATE (BEAR x LOW ATR x POSITIVE bar-2) and the
+newly-defined MIRROR_CANDIDATE (BULL_OR_NEUTRAL x LOW x NON_POSITIVE) as
+SIGNAL_CANDIDATE via RECOGNIZED_CANDIDATES -- this only widens which
+regime_state strings this engine reports as a signal; direction is still
+decided nowhere in this file (that remains .23's separately-reviewed
+VALIDATED_LONG_ENTRY_REGIME_LABELS / VALIDATED_SHORT_ENTRY_REGIME_LABELS).
+
+Adds required-vs-optional symbol handling so any symbol .12 reports (not
+just BTC/ETH) gets its own decision: BTC/USD and ETH/USD remain the only
+symbols that can block the whole decision if missing/invalid
+(REQUIRED_SYMBOLS); every other symbol validates or blocks independently
+(optional_symbols_blocked), mirroring the pattern already shipped in .12.
+
+print_report() now iterates the decisions actually produced instead of a
+fixed BTC/ETH tuple, and labels each symbol REQUIRED/OPTIONAL in the report.
+
+Downstream-critical reason strings (FROZEN_CANDIDATE_MATCH /
+FROZEN_CANDIDATE_NOT_PRESENT) and the existing FROZEN_CANDIDATE-only
+consistency check against .12's frozen_candidate_match flag are preserved
+unchanged, since .14's verify_candidate_consistency() checks them literally.
+
+Adds 10 contract tests covering both-candidate recognition, the
+CANDIDATE_MATCH_INCONSISTENT guard for each candidate, required-symbol
+fail-closed behavior, optional-symbol non-cascading blocking, and the
+updated print_report() output. Full existing suite (21 tests) still green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05313_signal_decision_engine.py         | 102 +++++--
+ ...test_aura_v05313_signal_decision_engine.py | 253 ++++++++++++++++++
+ 2 files changed, 333 insertions(+), 22 deletions(-)
+ create mode 100644 tests/test_aura_v05313_signal_decision_engine.py
+
+diff --git a/aura_v05313_signal_decision_engine.py b/aura_v05313_signal_decision_engine.py
+index 4804520..d49e400 100644
+--- a/aura_v05313_signal_decision_engine.py
++++ b/aura_v05313_signal_decision_engine.py
+@@ -67,6 +67,9 @@ DEFAULT_OUTPUT = Path(
+ )
+ 
+ SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
++# block the whole decision if missing/invalid. Kept as a separate name
++# (aliased to SYMBOLS) so the rest of this file reads unambiguously.
+ 
+ # Locked research configuration. These values must agree with v0.5.3.12.
+ FROZEN_CANDIDATE = "BEAR x LOW ATR x POSITIVE bar-2"
+@@ -75,6 +78,23 @@ FROZEN_EMA_PERIOD_4H = 50
+ FROZEN_ATR_PERIOD_1H = 14
+ FROZEN_BAR_2_LAG_HOURS = 2
+ 
++# A second, deliberately-reviewed frozen candidate: the exact structural
++# mirror of FROZEN_CANDIDATE (opposite trend, opposite bar-2 sign, same ATR
++# threshold/EMA period -- .12 already computes this regime_state for every
++# symbol, nothing here recalculates anything). Recognizing this pattern as
++# a signal is a decision about which REGIME STATES this engine reports as
++# SIGNAL_CANDIDATE -- it is still not a direction decision. Direction is
++# decided nowhere in this file; v0.5.3.23's own explicit, separately
++# reviewed allowlists (VALIDATED_LONG_ENTRY_REGIME_LABELS /
++# VALIDATED_SHORT_ENTRY_REGIME_LABELS) are the only place BUY/SELL is ever
++# assigned, and they key off the regime_state string this engine passes
++# through unchanged.
++MIRROR_CANDIDATE = "BULL_OR_NEUTRAL x LOW x NON_POSITIVE"
++
++# Every regime_state this engine will report as SIGNAL_CANDIDATE. Adding a
++# candidate here does not authorize a direction or a trade -- see above.
++RECOGNIZED_CANDIDATES: frozenset[str] = frozenset({FROZEN_CANDIDATE, MIRROR_CANDIDATE})
++
+ 
+ def stable_json(obj: Any) -> str:
+     return json.dumps(
+@@ -298,23 +318,29 @@ def evaluate_symbol(symbol: str, item: dict[str, Any]) -> dict[str, Any]:
+         return result
+ 
+     regime_state = state.get("regime_state")
+-    candidate_match = state.get("frozen_candidate_match")
++    frozen_flag = state.get("frozen_candidate_match")
+ 
+     result["market_state_valid"] = True
+-    result["candidate_match"] = candidate_match is True
+     result["state_timestamp"] = state.get("timestamp")
+     result["regime_state"] = regime_state
+ 
+-    # The state itself must agree with the frozen candidate flag. This is a
+-    # consistency check, not an indicator recalculation.
+-    expected_match = regime_state == FROZEN_CANDIDATE
++    # v0.5.3.12's own frozen_candidate_match flag is specific to
++    # FROZEN_CANDIDATE (its one named candidate) -- it was computed before
++    # MIRROR_CANDIDATE existed and says nothing about it. The consistency
++    # check below is therefore scoped to FROZEN_CANDIDATE only; this is
++    # still a consistency check against a value v0.5.3.12 already computed,
++    # not an indicator recalculation.
++    expected_frozen_flag = regime_state == FROZEN_CANDIDATE
+ 
+-    if candidate_match is not expected_match:
++    if frozen_flag is not expected_frozen_flag:
+         result["reason"] = "CANDIDATE_MATCH_INCONSISTENT"
+         result["decision"] = "BLOCKED"
+         return result
+ 
+-    if expected_match:
++    is_recognized = regime_state in RECOGNIZED_CANDIDATES
++    result["candidate_match"] = is_recognized
++
++    if is_recognized:
+         result["decision"] = "SIGNAL_CANDIDATE"
+         result["reason"] = "FROZEN_CANDIDATE_MATCH"
+     else:
+@@ -355,37 +381,49 @@ def process(snapshot: dict[str, Any], input_path: Path) -> dict[str, Any]:
+         decision["invalid_reasons"] = ["MISSING_SYMBOL_STATES"]
+         return decision
+ 
+-    selected = [s for s in SYMBOLS if s in symbols]
++    # Every symbol v0.5.3.12 actually reported gets evaluated; REQUIRED_SYMBOLS
++    # (BTC/ETH) are added even if somehow absent so the missing-required
++    # check below still fires. This mirrors v0.5.3.12's own present-vs-
++    # required split -- optional symbols individually validate/invalidate
++    # without blocking every other symbol's decision.
++    selected = sorted(set(symbols.keys()) | set(REQUIRED_SYMBOLS))
+     if not selected:
+         decision["invalid_reasons"] = ["NO_REQUIRED_SYMBOL_STATES"]
+         return decision
+ 
+-    # This engine expects both required assets from the canonical state. It
+-    # does not silently substitute a partial market view.
+-    missing = [s for s in SYMBOLS if s not in symbols]
+-    if missing:
++    # REQUIRED_SYMBOLS must still always be present. This engine does not
++    # silently substitute a partial market view for BTC/ETH specifically.
++    missing_required = [s for s in REQUIRED_SYMBOLS if s not in symbols]
++    if missing_required:
+         decision["invalid_reasons"] = [
+-            "MISSING_REQUIRED_SYMBOL:" + s for s in missing
++            "MISSING_REQUIRED_SYMBOL:" + s for s in missing_required
+         ]
+         return decision
+ 
+     signal_count = 0
+-    blocked_count = 0
++    required_blocked_count = 0
++    optional_blocked_symbols: list[str] = []
+ 
+-    for symbol in SYMBOLS:
+-        result = evaluate_symbol(symbol, symbols[symbol])
++    for symbol in selected:
++        result = evaluate_symbol(symbol, symbols.get(symbol))
+         decision["decisions"][symbol] = result
+ 
+         if result["decision"] == "SIGNAL_CANDIDATE":
+             signal_count += 1
+         elif result["decision"] == "BLOCKED":
+-            blocked_count += 1
+-
+-    if blocked_count:
++            if symbol in REQUIRED_SYMBOLS:
++                required_blocked_count += 1
++            else:
++                # An optional symbol's own bad data/inconsistency blocks
++                # only that symbol's decision, never the whole cycle --
++                # same relaxation v0.5.3.12 already applies.
++                optional_blocked_symbols.append(symbol)
++
++    if required_blocked_count:
+         decision["decision_status"] = "BLOCKED"
+         decision["overall_decision"] = "BLOCKED"
+         decision["invalid_reasons"] = [
+-            "ONE_OR_MORE_SYMBOL_DECISIONS_BLOCKED"
++            "ONE_OR_MORE_REQUIRED_SYMBOL_DECISIONS_BLOCKED"
+         ]
+         return decision
+ 
+@@ -396,6 +434,9 @@ def process(snapshot: dict[str, Any], input_path: Path) -> dict[str, Any]:
+     else:
+         decision["overall_decision"] = "NO_SIGNAL"
+ 
++    if optional_blocked_symbols:
++        decision["optional_symbols_blocked"] = sorted(optional_blocked_symbols)
++
+     return decision
+ 
+ 
+@@ -410,6 +451,7 @@ def print_report(decision: dict[str, Any], output_path: Path) -> None:
+     print("LIVE EXECUTION       : DISABLED")
+     print()
+     print(f"FROZEN CANDIDATE     : {FROZEN_CANDIDATE}")
++    print(f"MIRROR CANDIDATE     : {MIRROR_CANDIDATE}")
+     print(f"ATR THRESHOLD        : {FROZEN_ATR_THRESHOLD_PCT:.3f}%")
+     print(f"4H EMA               : EMA{FROZEN_EMA_PERIOD_4H}")
+     print(f"BAR-2                : {FROZEN_BAR_2_LAG_HOURS}H CLOSE-TO-CLOSE")
+@@ -429,9 +471,25 @@ def print_report(decision: dict[str, Any], output_path: Path) -> None:
+     print(f"CONFIG VERIFIED      : {decision['frozen_configuration_verified']}")
+     print()
+ 
+-    for symbol in SYMBOLS:
++    # Iterate whatever symbols this decision actually reported on -- the
++    # full discovered coin universe, not a fixed BTC/ETH pair -- so the
++    # report never silently drops symbols v0.5.3.12 supplied. REQUIRED_SYMBOLS
++    # that are somehow still missing a decision entry are reported explicitly
++    # rather than skipped.
++    reported_symbols = sorted(set(decision["decisions"].keys()) | set(REQUIRED_SYMBOLS))
++
++    optional_blocked = set(decision.get("optional_symbols_blocked", []))
++
++    for symbol in reported_symbols:
+         item = decision["decisions"].get(symbol)
+-        print(symbol)
++        label = symbol
++        if symbol in REQUIRED_SYMBOLS:
++            label += "  [REQUIRED]"
++        elif symbol in optional_blocked:
++            label += "  [OPTIONAL, BLOCKED -- did not affect overall decision]"
++        else:
++            label += "  [OPTIONAL]"
++        print(label)
+         if not item:
+             print("  DECISION           : BLOCKED")
+             print("  REASON             : MISSING_DECISION")
+diff --git a/tests/test_aura_v05313_signal_decision_engine.py b/tests/test_aura_v05313_signal_decision_engine.py
+new file mode 100644
+index 0000000..08d3fb0
+--- /dev/null
++++ b/tests/test_aura_v05313_signal_decision_engine.py
+@@ -0,0 +1,253 @@
++"""
++Contract tests for AURA v0.5.3.13 Signal Decision Engine.
++
++Covers the multi-candidate (FROZEN_CANDIDATE + MIRROR_CANDIDATE) and
++all-coin-universe (required-vs-optional symbol) behavior added on top of
++the original locked BTC/ETH-only, single-candidate architecture.
++
++Fixtures are built directly against the real module's own hashing helpers
++(stable_json / sha256_text) so a passing test here is meaningful evidence
++about the real .12 -> .13 contract, not just this module in isolation.
++"""
++from __future__ import annotations
++
++import importlib.util
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def _load(module_filename: str, module_name: str):
++    spec = importlib.util.spec_from_file_location(module_name, ROOT / module_filename)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[module_name] = module
++    spec.loader.exec_module(module)  # type: ignore[union-attr]
++    return module
++
++
++engine = _load("aura_v05313_signal_decision_engine.py", "aura_v05313_engine")
++
++FROZEN_CANDIDATE = engine.FROZEN_CANDIDATE
++MIRROR_CANDIDATE = engine.MIRROR_CANDIDATE
++REQUIRED_SYMBOLS = engine.REQUIRED_SYMBOLS
++
++
++def _build_canonical_and_hash(symbol_timestamps: dict) -> tuple[dict, str, str]:
++    canonical = {
++        "symbols": {
++            symbol: {"timestamp": ts}
++            for symbol, ts in symbol_timestamps.items()
++        }
++    }
++    state_hash = engine.sha256_text(engine.stable_json(canonical))
++    timestamps = [f"{s}:{symbol_timestamps[s]}" for s in sorted(symbol_timestamps)]
++    state_id = f"MS-{engine.sha256_text('|'.join(timestamps) + '|' + state_hash)[:24]}"
++    return canonical, state_hash, state_id
++
++
++def frozen_symbol(timestamp: str = "2026-09-01T00:00:00Z") -> dict:
++    return {"regime_state": FROZEN_CANDIDATE, "frozen_candidate_match": True, "timestamp": timestamp}
++
++
++def mirror_symbol(timestamp: str = "2026-09-01T00:00:00Z") -> dict:
++    return {"regime_state": MIRROR_CANDIDATE, "frozen_candidate_match": False, "timestamp": timestamp}
++
++
++def neutral_symbol(timestamp: str = "2026-09-01T00:00:00Z") -> dict:
++    return {"regime_state": "BULL x HIGH ATR x POSITIVE bar-2", "frozen_candidate_match": False, "timestamp": timestamp}
++
++
++def make_snapshot(symbol_specs: dict) -> dict:
++    """
++    symbol_specs: symbol -> spec dict (as produced by frozen_symbol/mirror_symbol/
++    neutral_symbol, or a custom dict with the same keys, optionally overriding
++    "data_status" / "market_state_valid") or None (symbol entirely absent from
++    the top-level "symbols" map, e.g. to simulate a missing required symbol).
++    """
++    present = {s: v for s, v in symbol_specs.items() if v is not None}
++    symbol_timestamps = {s: v.get("timestamp", "2026-09-01T00:00:00Z") for s, v in present.items()}
++    canonical, state_hash, state_id = _build_canonical_and_hash(symbol_timestamps)
++
++    symbols_payload = {}
++    for symbol, spec in present.items():
++        symbols_payload[symbol] = {
++            "data_status": spec.get("data_status", "VALID"),
++            "market_state_valid": spec.get("market_state_valid", True),
++            "market_state": {
++                "timestamp": spec.get("timestamp", "2026-09-01T00:00:00Z"),
++                "regime_state": spec.get("regime_state"),
++                "frozen_candidate_match": spec.get("frozen_candidate_match", False),
++            },
++        }
++
++    return {
++        "agent_version": "AURA v0.5.3.12",
++        "engine": "MARKET_STATE_ENGINE",
++        "data_status": "VALID",
++        "market_state_valid": True,
++        "guardrails": {
++            "single_source_of_truth": True,
++            "no_recalculation_downstream": True,
++            "orders_allowed": False,
++            "paper_execution": False,
++            "live_execution": False,
++            "strategy_changed": False,
++            "parameters_changed": False,
++        },
++        "frozen_configuration": {
++            "candidate": engine.FROZEN_CANDIDATE,
++            "atr_threshold_pct": engine.FROZEN_ATR_THRESHOLD_PCT,
++            "ema_period_4h": engine.FROZEN_EMA_PERIOD_4H,
++            "atr_period_1h": engine.FROZEN_ATR_PERIOD_1H,
++            "bar_2_lag_hours": engine.FROZEN_BAR_2_LAG_HOURS,
++        },
++        "state_hash": state_hash,
++        "state_id": state_id,
++        "canonical_state": canonical,
++        "symbols": symbols_payload,
++    }
++
++
++def run(symbol_specs: dict) -> dict:
++    snapshot = make_snapshot(symbol_specs)
++    return engine.process(snapshot, Path("test-fixture-input.json"))
++
++
++# ---------------------------------------------------------------------------
++# Candidate recognition (FROZEN_CANDIDATE + MIRROR_CANDIDATE)
++# ---------------------------------------------------------------------------
++
++
++def test_frozen_candidate_on_both_required_symbols_is_signal_candidate():
++    decision = run({"BTC/USD": frozen_symbol(), "ETH/USD": frozen_symbol()})
++
++    assert decision["decision_status"] == "DECIDED"
++    assert decision["overall_decision"] == "SIGNAL_CANDIDATE"
++    for symbol in REQUIRED_SYMBOLS:
++        item = decision["decisions"][symbol]
++        assert item["decision"] == "SIGNAL_CANDIDATE"
++        assert item["candidate_match"] is True
++        assert item["reason"] == "FROZEN_CANDIDATE_MATCH"
++
++
++def test_mirror_candidate_alone_is_also_signal_candidate():
++    decision = run({"BTC/USD": mirror_symbol(), "ETH/USD": neutral_symbol()})
++
++    assert decision["overall_decision"] == "SIGNAL_CANDIDATE"
++    btc = decision["decisions"]["BTC/USD"]
++    assert btc["decision"] == "SIGNAL_CANDIDATE"
++    assert btc["candidate_match"] is True
++    # Downstream (.14/.23) literal-string contract must be preserved even
++    # for the mirror candidate -- direction is never decided here.
++    assert btc["reason"] == "FROZEN_CANDIDATE_MATCH"
++
++    eth = decision["decisions"]["ETH/USD"]
++    assert eth["decision"] == "NO_SIGNAL"
++    assert eth["reason"] == "FROZEN_CANDIDATE_NOT_PRESENT"
++
++
++def test_neither_candidate_present_is_no_signal():
++    decision = run({"BTC/USD": neutral_symbol(), "ETH/USD": neutral_symbol()})
++
++    assert decision["decision_status"] == "DECIDED"
++    assert decision["overall_decision"] == "NO_SIGNAL"
++    for symbol in REQUIRED_SYMBOLS:
++        assert decision["decisions"][symbol]["decision"] == "NO_SIGNAL"
++
++
++def test_candidate_match_inconsistent_still_detected_for_frozen_candidate():
++    bad = frozen_symbol()
++    bad["frozen_candidate_match"] = False  # .12 says no match, but regime_state says FROZEN_CANDIDATE
++    decision = run({"BTC/USD": bad, "ETH/USD": neutral_symbol()})
++
++    assert decision["overall_decision"] == "BLOCKED"
++    assert decision["decisions"]["BTC/USD"]["reason"] == "CANDIDATE_MATCH_INCONSISTENT"
++
++
++def test_mirror_candidate_with_frozen_flag_true_is_inconsistent():
++    # .12 has no notion of MIRROR_CANDIDATE, so frozen_candidate_match must
++    # only ever be True when regime_state == FROZEN_CANDIDATE. A mirror
++    # regime_state with frozen_candidate_match=True is a source-data
++    # inconsistency, not a recognized signal.
++    bad = mirror_symbol()
++    bad["frozen_candidate_match"] = True
++    decision = run({"BTC/USD": bad, "ETH/USD": neutral_symbol()})
++
++    assert decision["overall_decision"] == "BLOCKED"
++    assert decision["decisions"]["BTC/USD"]["reason"] == "CANDIDATE_MATCH_INCONSISTENT"
++
++
++# ---------------------------------------------------------------------------
++# Required vs. optional symbol handling (all-coin-universe support)
++# ---------------------------------------------------------------------------
++
++
++def test_missing_required_symbol_blocks_whole_decision():
++    decision = run({"BTC/USD": frozen_symbol(), "ETH/USD": None})
++
++    assert decision["decision_status"] == "BLOCKED"
++    assert decision["overall_decision"] == "BLOCKED"
++    assert "MISSING_REQUIRED_SYMBOL:ETH/USD" in decision["invalid_reasons"]
++
++
++def test_optional_symbol_blocked_does_not_cascade_to_overall_decision():
++    decision = run({
++        "BTC/USD": frozen_symbol(),
++        "ETH/USD": neutral_symbol(),
++        "AVAX/USD": {"regime_state": None, "market_state_valid": False, "timestamp": "2026-09-01T00:00:00Z"},
++    })
++
++    assert decision["decision_status"] == "DECIDED"
++    assert decision["overall_decision"] == "SIGNAL_CANDIDATE"
++    assert decision["decisions"]["AVAX/USD"]["decision"] == "BLOCKED"
++    assert decision.get("optional_symbols_blocked") == ["AVAX/USD"]
++
++
++def test_required_symbol_blocked_still_blocks_whole_decision_even_with_optional_symbols_present():
++    decision = run({
++        "BTC/USD": {"regime_state": None, "market_state_valid": False, "timestamp": "2026-09-01T00:00:00Z"},
++        "ETH/USD": frozen_symbol(),
++        "AVAX/USD": neutral_symbol(),
++    })
++
++    assert decision["decision_status"] == "BLOCKED"
++    assert decision["overall_decision"] == "BLOCKED"
++    assert "ONE_OR_MORE_REQUIRED_SYMBOL_DECISIONS_BLOCKED" in decision["invalid_reasons"]
++    # AVAX/USD's own (valid) evaluation is still recorded even though it
++    # cannot save an overall decision blocked by a required symbol.
++    assert decision["decisions"]["AVAX/USD"]["decision"] == "NO_SIGNAL"
++
++
++def test_full_coin_universe_all_optional_symbols_evaluated_independently():
++    decision = run({
++        "BTC/USD": frozen_symbol(),
++        "ETH/USD": neutral_symbol(),
++        "AVAX/USD": mirror_symbol(),
++        "SOL/USD": neutral_symbol(),
++    })
++
++    assert decision["overall_decision"] == "SIGNAL_CANDIDATE"
++    assert decision["decisions"]["AVAX/USD"]["decision"] == "SIGNAL_CANDIDATE"
++    assert decision["decisions"]["SOL/USD"]["decision"] == "NO_SIGNAL"
++    assert "optional_symbols_blocked" not in decision
++
++
++# ---------------------------------------------------------------------------
++# print_report() smoke test -- must not reference the old fixed SYMBOLS tuple
++# ---------------------------------------------------------------------------
++
++
++def test_print_report_covers_all_reported_symbols_including_optional(capsys):
++    decision = run({
++        "BTC/USD": frozen_symbol(),
++        "ETH/USD": neutral_symbol(),
++        "AVAX/USD": {"regime_state": None, "market_state_valid": False, "timestamp": "2026-09-01T00:00:00Z"},
++    })
++
++    engine.print_report(decision, Path("test-output.json"))
++    out = capsys.readouterr().out
++
++    assert "BTC/USD  [REQUIRED]" in out
++    assert "ETH/USD  [REQUIRED]" in out
++    assert "AVAX/USD  [OPTIONAL, BLOCKED" in out
+-- 
+2.43.0
+

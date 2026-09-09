@@ -1,0 +1,236 @@
+From 10340ac19282169e47d65811e9a5dc3ecd84e975 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 18:46:10 +0000
+Subject: [PATCH 10/10] Extend status dashboard to the full discovered coin
+ universe
+
+scripts/generate_status_dashboard.py rendered exactly two symbol cards
+(BTC/USD, ETH/USD) via a hardcoded SYMBOLS tuple, matching the old
+BTC/ETH-only pipeline. Now that .13-.19/.23 evaluate the full
+discovered Alpaca crypto universe under the required-vs-optional
+symbol pattern, the dashboard needs to show every symbol a cycle
+actually reported on, not just the required pair.
+
+- Renamed SYMBOLS -> REQUIRED_SYMBOLS (BTC/USD, ETH/USD): these are
+  now the *floor*, always rendered even with no data yet, rather than
+  the ceiling.
+- render() now computes discovered_symbols as the union of the
+  signal/safety/spec decisions dict keys plus REQUIRED_SYMBOLS, and
+  builds one card per discovered symbol. symbol_card() already looked
+  up each source independently via .get(...), so an optional symbol
+  missing from one upstream source (e.g. present in signal but not yet
+  in safety) still renders cleanly with dashes for the missing pieces
+  instead of crashing -- no logic change was needed there.
+- Updated the static header text that hardcoded "(BTC/USD, ETH/USD)"
+  to describe the full discovered universe with BTC/USD, ETH/USD
+  called out as always-required.
+- This is a read-only, report-only change: the dashboard has no
+  ability to place an order and nothing here touches .19's
+  execution_authorized boundary or .23's direction allowlists.
+
+Added tests/test_generate_status_dashboard.py (7 tests, loaded via
+importlib like the other script-style tests in this repo): no-data
+placeholder renders no cards, required symbols always render even
+with empty upstream data, an optional discovered symbol (e.g.
+AVAX/USD) gets its own card, an optional symbol missing from some but
+not all upstream sources doesn't crash, a required symbol absent from
+every upstream source for a given cycle still renders, the header no
+longer hardcodes exactly two symbols, and a symbol_card() smoke test
+with no upstream data at all.
+
+Full suite: 88 passed (pytest, excluding the two Alpaca-credential
+tests that fail in this sandbox for unrelated reasons) plus the
+existing 11/11 .22 adapter contract test, unaffected by this change.
+
+This is the tenth and final file of Phase 1 (BTC/ETH-required +
+mirror short candidate + full discovered coin universe support),
+authorized by Martin's "Start building :)".
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ scripts/generate_status_dashboard.py    |  20 +++-
+ tests/test_generate_status_dashboard.py | 126 ++++++++++++++++++++++++
+ 2 files changed, 143 insertions(+), 3 deletions(-)
+ create mode 100644 tests/test_generate_status_dashboard.py
+
+diff --git a/scripts/generate_status_dashboard.py b/scripts/generate_status_dashboard.py
+index d9af7a2..fcb1b07 100644
+--- a/scripts/generate_status_dashboard.py
++++ b/scripts/generate_status_dashboard.py
+@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
+ RUNTIME_STATE = ROOT / "regime_output" / "runtime" / "runtime_state.json"
+ CYCLES_DIR = ROOT / "regime_output" / "runtime" / "cycles"
+ DOCS_DIR = ROOT / "docs"
+-SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = ("BTC/USD", "ETH/USD")  # always shown, even with no data yet
+ 
+ 
+ def load_json(path: Path) -> dict[str, Any] | None:
+@@ -144,7 +144,21 @@ def render(runtime_state: dict | None, signal: dict | None, safety: dict | None,
+ <div class="card"><div class="label">Execution authorized</div><div class="metric">{badge('TRUE' if exec_authorized else 'FALSE', 'warn' if exec_authorized else 'safe')}</div></div>
+ </div>"""
+         status_banner = ""
+-        cards = "".join(symbol_card(s, signal, safety, spec) for s in SYMBOLS)
++        # Discovered-universe symbol list: any symbol any upstream payload
++        # actually reported for this cycle, unioned with REQUIRED_SYMBOLS so
++        # BTC/USD and ETH/USD always render a card even if this particular
++        # cycle happened to produce no decision entry for one of them (e.g.
++        # a required-symbol BLOCKED outcome with an empty decisions dict).
++        # This mirrors the required-vs-optional symbol pattern used
++        # throughout the v0.5.3 pipeline (.13-.19, .23): required symbols
++        # are always shown, every other discovered symbol is shown too.
++        discovered_symbols = sorted(
++            set((signal or {}).get("decisions", {}).keys())
++            | set((safety or {}).get("decisions", {}).keys())
++            | set((spec or {}).get("decisions", {}).keys())
++            | set(REQUIRED_SYMBOLS)
++        )
++        cards = "".join(symbol_card(s, signal, safety, spec) for s in discovered_symbols)
+ 
+     return f"""<!doctype html>
+ <html lang="en"><head><meta charset="utf-8">
+@@ -168,7 +182,7 @@ td.label{{color:#9aa8c7;width:45%}}
+ <body>
+ <p><a href="https://github.com/mpoubot/aura-autonomous-trading-agent">← AURA repository</a></p>
+ <h1>AURA Paper-Chain Status</h1>
+-<p>v0.5.3 chain • Alpaca crypto (BTC/USD, ETH/USD) • PAPER account • {badge('NO LIVE EXECUTION', 'safe')}</p>
++<p>v0.5.3 chain • Alpaca crypto (full discovered coin universe; BTC/USD, ETH/USD always required) • PAPER account • {badge('NO LIVE EXECUTION', 'safe')}</p>
+ 
+ {top_metrics}
+ {status_banner}
+diff --git a/tests/test_generate_status_dashboard.py b/tests/test_generate_status_dashboard.py
+new file mode 100644
+index 0000000..0bc2b46
+--- /dev/null
++++ b/tests/test_generate_status_dashboard.py
+@@ -0,0 +1,126 @@
++#!/usr/bin/env python3
++"""Tests for scripts/generate_status_dashboard.py's required-vs-optional
++symbol handling.
++
++Loaded via importlib (script lives outside any package), matching the
++convention used elsewhere in tests/ (e.g.
++tests/test_aura_v05323_execution_specification_builder.py).
++"""
++from __future__ import annotations
++
++import importlib.util
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++SCRIPT_PATH = ROOT / "scripts" / "generate_status_dashboard.py"
++
++spec = importlib.util.spec_from_file_location("aura_generate_status_dashboard", SCRIPT_PATH)
++dashboard = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(dashboard)
++
++
++def make_signal(symbols_and_states: dict[str, str]) -> dict:
++    return {
++        "decisions": {
++            symbol: {"regime_state": state, "decision": "SIGNAL_CANDIDATE"}
++            for symbol, state in symbols_and_states.items()
++        }
++    }
++
++
++def make_safety(symbols: list[str], *, authorized: bool = False) -> dict:
++    return {
++        "decisions": {
++            symbol: {"execution_authorized": authorized, "reason": "RESEARCH_ONLY"}
++            for symbol in symbols
++        }
++    }
++
++
++def test_no_runtime_state_yet_renders_placeholder_with_no_cards():
++    page = dashboard.render(None, None, None, None)
++    assert "No runtime cycle has been published yet" in page
++    # Never crashes, never fabricates a card for data that doesn't exist.
++    assert "<h2>BTC/USD" not in page
++    assert "<h2>ETH/USD" not in page
++
++
++def test_required_symbols_always_render_even_with_no_decision_data():
++    runtime_state = {"cycle_id": "c1", "status": "PASS", "kill_switch_active": False, "execution_authorized": False}
++    page = dashboard.render(runtime_state, None, None, None)
++    # BTC/USD and ETH/USD are REQUIRED_SYMBOLS: they render even with
++    # nothing published for them yet, same as before this change.
++    assert "<h2>BTC/USD" in page
++    assert "<h2>ETH/USD" in page
++
++
++def test_optional_discovered_symbol_gets_its_own_card():
++    runtime_state = {"cycle_id": "c2", "status": "PASS", "kill_switch_active": False, "execution_authorized": False}
++    signal = make_signal({"BTC/USD": "BEAR", "ETH/USD": "BEAR", "AVAX/USD": "BULL"})
++    safety = make_safety(["BTC/USD", "ETH/USD", "AVAX/USD"])
++    page = dashboard.render(runtime_state, signal, safety, None)
++    assert "<h2>BTC/USD" in page
++    assert "<h2>ETH/USD" in page
++    assert "<h2>AVAX/USD" in page
++
++
++def test_optional_symbol_missing_from_other_upstream_sources_does_not_crash():
++    runtime_state = {"cycle_id": "c3", "status": "PASS", "kill_switch_active": False, "execution_authorized": False}
++    # AVAX/USD only appears in `signal`, not in `safety` or `spec` -- the
++    # per-symbol card must still render using dashes for the missing pieces,
++    # never raise, and never cascade into dropping BTC/ETH.
++    signal = make_signal({"BTC/USD": "BEAR", "ETH/USD": "BEAR", "AVAX/USD": "BULL"})
++    safety = make_safety(["BTC/USD", "ETH/USD"])
++    page = dashboard.render(runtime_state, signal, safety, None)
++    assert "<h2>AVAX/USD" in page
++    assert "<h2>BTC/USD" in page
++    assert "<h2>ETH/USD" in page
++
++
++def test_required_symbols_render_even_if_absent_from_every_upstream_source():
++    # Pathological case: signal/safety/spec exist for this cycle but happen
++    # to report nothing for ETH/USD (e.g. it was BLOCKED upstream with an
++    # empty decisions entry). REQUIRED_SYMBOLS must still guarantee a card.
++    runtime_state = {"cycle_id": "c4", "status": "PASS", "kill_switch_active": False, "execution_authorized": False}
++    signal = make_signal({"BTC/USD": "BEAR"})
++    safety = make_safety(["BTC/USD"])
++    page = dashboard.render(runtime_state, signal, safety, None)
++    assert "<h2>BTC/USD" in page
++    assert "<h2>ETH/USD" in page
++
++
++def test_header_no_longer_hardcodes_exactly_two_symbols():
++    runtime_state = None
++    page = dashboard.render(runtime_state, None, None, None)
++    assert "(BTC/USD, ETH/USD) •" not in page
++    assert "full discovered coin universe" in page
++
++
++def test_symbol_card_smoke_no_upstream_data_for_symbol():
++    card = dashboard.symbol_card("DOGE/USD", None, None, None)
++    assert "DOGE/USD" in card
++    assert "NOT RUN" in card
++
++
++if __name__ == "__main__":
++    import sys
++
++    failures = 0
++    tests = [
++        test_no_runtime_state_yet_renders_placeholder_with_no_cards,
++        test_required_symbols_always_render_even_with_no_decision_data,
++        test_optional_discovered_symbol_gets_its_own_card,
++        test_optional_symbol_missing_from_other_upstream_sources_does_not_crash,
++        test_required_symbols_render_even_if_absent_from_every_upstream_source,
++        test_header_no_longer_hardcodes_exactly_two_symbols,
++        test_symbol_card_smoke_no_upstream_data_for_symbol,
++    ]
++    for t in tests:
++        try:
++            t()
++            print(f"PASS: {t.__name__}")
++        except Exception as exc:  # noqa: BLE001
++            failures += 1
++            print(f"FAIL: {t.__name__}: {exc}")
++    print(f"{len(tests) - failures}/{len(tests)} passed")
++    sys.exit(1 if failures else 0)
+-- 
+2.43.0
+

@@ -1,0 +1,885 @@
+From 7e7342fd9b87efe9fcc17581fb26e38ddfde26b2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 17:09:46 +0000
+Subject: [PATCH 06/10] .18 Reconciliation: required-vs-optional symbol
+ handling for full coin universe
+
+Same pattern as .13-.17, extended to this file's two-source (ledger +
+observed-execution) verification: REQUIRED_SYMBOLS (BTC/ETH) remain the
+only symbols whose structural invalidity, or evidence conflict, can block
+or gate the whole reconciliation decision. Every other symbol either
+source reports is reconciled independently.
+
+Specific changes:
+- New ledger_entry_reconciliation_errors_for_symbol() and
+  observation_errors_for_symbol() helpers factor out the original
+  per-symbol structural checks on each of the two upstream sources.
+  verify_ledger() / verify_observed() now scope their per-symbol loop to
+  REQUIRED_SYMBOLS only, as global gates.
+- New reconcile_symbol() factors out the actual reconciliation decision
+  logic (ledger-event x observed-status -> reconciliation_state) so it can
+  be reused identically for required and optional symbols without
+  duplicating the branching, returning both the decision dict and its
+  state string for bucketing.
+- build_reconciliation()'s main loop iterates every symbol either source
+  reported (union with REQUIRED_SYMBOLS). Optional symbols get their own
+  ledger/observation structural check first -- per this file's own
+  fail-closed philosophy, a missing or invalid observation is never
+  silently treated as reconciled, even for an optional symbol -- then the
+  same reconcile_symbol() logic as required symbols.
+- Deliberate aggregate design: reconciled_count/pending_count span the
+  full symbol set (any symbol's clean reconciliation can make the overall
+  RECONCILED, mirroring the any-symbol-can-signal pattern in .13-.17),
+  but only REQUIRED_SYMBOLS conflicts gate overall_reconciliation to
+  CONFLICT -- an optional symbol's own bad evidence blocks only that
+  symbol (recorded in optional_symbols_blocked), never the whole cycle.
+- main()'s missing-observation-file fallback path: its no_order_only
+  check is now scoped to REQUIRED_SYMBOLS only (an optional symbol having
+  an order intent must not affect it), and the resulting per-symbol
+  UNVERIFIED decisions now also cover any optional symbols the ledger
+  reported, each correctly reasoned (NO_OBSERVATION_SOURCE_FOR_NO_ORDER
+  vs. NO_OBSERVATION_SOURCE_AVAILABLE) rather than silently dropped.
+- print_report() iterates actual decisions instead of a fixed BTC/ETH
+  tuple, labeling each symbol REQUIRED/OPTIONAL.
+
+Adds 10 contract tests, including the required-conflict-gates-overall vs.
+optional-conflict-does-not-gate distinction, and the missing-observation-
+never-silently-reconciled behavior for an optional symbol. Full suite
+(70 tests) green.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X5AgqAqchjFnmYZqHxXGH6
+---
+ aura_v05318_reconciliation.py            | 416 +++++++++++++++--------
+ tests/test_aura_v05318_reconciliation.py | 307 +++++++++++++++++
+ 2 files changed, 576 insertions(+), 147 deletions(-)
+ create mode 100644 tests/test_aura_v05318_reconciliation.py
+
+diff --git a/aura_v05318_reconciliation.py b/aura_v05318_reconciliation.py
+index 4adb816..b952023 100644
+--- a/aura_v05318_reconciliation.py
++++ b/aura_v05318_reconciliation.py
+@@ -63,6 +63,11 @@ DEFAULT_OUTPUT = Path(
+     r"regime_output\reconciliation\reconciliation.json"
+ )
+ SYMBOLS = ("BTC/USD", "ETH/USD")
++REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
++# block the whole reconciliation decision if missing/invalid, or gate the
++# overall_reconciliation aggregate to CONFLICT. Kept as a separate name
++# (aliased to SYMBOLS) so the rest of this file reads unambiguously --
++# mirrors the same alias in v0.5.3.13-.17.
+ ALLOWED_LEDGER_EVENTS = {
+     "NO_ORDER_RECORDED",
+     "PAPER_ORDER_INTENT_RECORDED",
+@@ -166,6 +171,72 @@ def canonical_observed_hash(payload: dict[str, Any]) -> str:
+     return sha256_text(stable_json(canonical))
+ 
+ 
++def ledger_entry_reconciliation_errors_for_symbol(symbol: str, item: Any) -> list[str]:
++    """
++    Structural validity check for a single symbol's v0.5.3.17 ledger entry,
++    from reconciliation's point of view. No ledger state is recalculated
++    here. Note ALLOWED_LEDGER_EVENTS deliberately excludes "BLOCKED": a
++    symbol v0.5.3.17 itself already blocked has nothing to reconcile, and
++    naturally falls out as invalid here too (reported per-symbol, never
++    globally, for an optional symbol).
++    """
++    if not isinstance(item, dict):
++        return [f"MISSING_OR_INVALID_SYMBOL:{symbol}"]
++
++    errors: list[str] = []
++    event = item.get("ledger_event")
++    if event not in ALLOWED_LEDGER_EVENTS:
++        errors.append(f"INVALID_LEDGER_EVENT:{symbol}:{event!r}")
++    if item.get("position_exists") is not False:
++        errors.append(f"POSITION_CLAIM_NOT_FALSE:{symbol}")
++    if item.get("position_id") is not None:
++        errors.append(f"POSITION_ID_PRESENT:{symbol}")
++    if item.get("fill_price") is not None:
++        errors.append(f"FILL_PRICE_PRESENT_IN_LEDGER:{symbol}")
++    if item.get("fill_timestamp") is not None:
++        errors.append(f"FILL_TIMESTAMP_PRESENT_IN_LEDGER:{symbol}")
++
++    return errors
++
++
++def observation_errors_for_symbol(symbol: str, item: Any) -> list[str]:
++    """
++    Structural validity check for a single symbol's observed-execution
++    entry. No observation is fabricated or recalculated here.
++    """
++    if not isinstance(item, dict):
++        return [f"MISSING_OR_INVALID_OBSERVATION:{symbol}"]
++
++    errors: list[str] = []
++    status = item.get("order_status")
++    if status not in ALLOWED_OBSERVED_STATUSES:
++        errors.append(f"INVALID_OBSERVED_ORDER_STATUS:{symbol}:{status!r}")
++
++    position_exists = item.get("position_exists")
++    if not isinstance(position_exists, bool):
++        errors.append(f"INVALID_OBSERVED_POSITION_EXISTS:{symbol}")
++
++    position_id = item.get("position_id")
++    fill_price = item.get("fill_price")
++    fill_timestamp = item.get("fill_timestamp")
++
++    if position_exists is True and not isinstance(position_id, str):
++        errors.append(f"OBSERVED_POSITION_ID_REQUIRED:{symbol}")
++    if position_exists is False and position_id is not None:
++        errors.append(f"OBSERVED_POSITION_ID_WITHOUT_POSITION:{symbol}")
++
++    if status in {"FILLED", "PARTIALLY_FILLED"}:
++        if not isinstance(fill_price, (int, float)) or isinstance(fill_price, bool) or fill_price <= 0:
++            errors.append(f"OBSERVED_FILL_PRICE_REQUIRED:{symbol}")
++        if not isinstance(fill_timestamp, str) or not fill_timestamp:
++            errors.append(f"OBSERVED_FILL_TIMESTAMP_REQUIRED:{symbol}")
++    else:
++        if fill_price is not None or fill_timestamp is not None:
++            errors.append(f"OBSERVED_FILL_PRESENT_FOR_NONFILL:{symbol}")
++
++    return errors
++
++
+ def verify_ledger(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+     errors: list[str] = []
+ 
+@@ -221,22 +292,13 @@ def verify_ledger(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+         errors.append("MISSING_UPSTREAM_LEDGER_ENTRIES")
+         return False, sorted(set(errors))
+ 
+-    for symbol in SYMBOLS:
+-        item = entries.get(symbol)
+-        if not isinstance(item, dict):
+-            errors.append(f"MISSING_OR_INVALID_SYMBOL:{symbol}")
+-            continue
+-        event = item.get("ledger_event")
+-        if event not in ALLOWED_LEDGER_EVENTS:
+-            errors.append(f"INVALID_LEDGER_EVENT:{symbol}:{event!r}")
+-        if item.get("position_exists") is not False:
+-            errors.append(f"POSITION_CLAIM_NOT_FALSE:{symbol}")
+-        if item.get("position_id") is not None:
+-            errors.append(f"POSITION_ID_PRESENT:{symbol}")
+-        if item.get("fill_price") is not None:
+-            errors.append(f"FILL_PRICE_PRESENT_IN_LEDGER:{symbol}")
+-        if item.get("fill_timestamp") is not None:
+-            errors.append(f"FILL_TIMESTAMP_PRESENT_IN_LEDGER:{symbol}")
++    # Only REQUIRED_SYMBOLS (BTC/ETH) gate the whole decision here. Every
++    # other symbol v0.5.3.17 reports is validated independently, per-symbol,
++    # in build_reconciliation() below.
++    for symbol in REQUIRED_SYMBOLS:
++        errors.extend(
++            ledger_entry_reconciliation_errors_for_symbol(symbol, entries.get(symbol))
++        )
+ 
+     return len(errors) == 0, sorted(set(errors))
+ 
+@@ -266,39 +328,110 @@ def verify_observed(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+         errors.append("MISSING_OBSERVATIONS")
+         return False, sorted(set(errors))
+ 
+-    for symbol in SYMBOLS:
+-        item = observations.get(symbol)
+-        if not isinstance(item, dict):
+-            errors.append(f"MISSING_OR_INVALID_OBSERVATION:{symbol}")
+-            continue
+-
+-        status = item.get("order_status")
+-        if status not in ALLOWED_OBSERVED_STATUSES:
+-            errors.append(f"INVALID_OBSERVED_ORDER_STATUS:{symbol}:{status!r}")
++    # Only REQUIRED_SYMBOLS (BTC/ETH) gate the whole decision here. Every
++    # other symbol's observation is validated independently, per-symbol, in
++    # build_reconciliation() below.
++    for symbol in REQUIRED_SYMBOLS:
++        errors.extend(observation_errors_for_symbol(symbol, observations.get(symbol)))
+ 
+-        position_exists = item.get("position_exists")
+-        if not isinstance(position_exists, bool):
+-            errors.append(f"INVALID_OBSERVED_POSITION_EXISTS:{symbol}")
++    return len(errors) == 0, sorted(set(errors))
+ 
+-        position_id = item.get("position_id")
+-        fill_price = item.get("fill_price")
+-        fill_timestamp = item.get("fill_timestamp")
+ 
+-        if position_exists is True and not isinstance(position_id, str):
+-            errors.append(f"OBSERVED_POSITION_ID_REQUIRED:{symbol}")
+-        if position_exists is False and position_id is not None:
+-            errors.append(f"OBSERVED_POSITION_ID_WITHOUT_POSITION:{symbol}")
++def reconcile_symbol(symbol: str, entry: dict[str, Any], obs: dict[str, Any]) -> tuple[dict[str, Any], str]:
++    """
++    Reconcile one symbol's already-validated ledger entry against its
++    already-validated observation. No execution or fill is fabricated
++    here -- every branch either confirms/reconciles with data the caller
++    supplied, or flags a conflict/pending state. Returns the decision dict
++    plus its reconciliation_state, so callers can bucket required-vs-
++    optional symbols identically without duplicating this logic.
++    """
++    ledger_event = entry["ledger_event"]
++    status = obs["order_status"]
++    observed_position = obs["position_exists"]
++
++    if ledger_event == "NO_ORDER_RECORDED":
++        if observed_position or status in {"FILLED", "PARTIALLY_FILLED", "PENDING"}:
++            state = "RECONCILIATION_CONFLICT"
++            reason = "OBSERVED_EXECUTION_WITHOUT_LEDGER_ORDER"
++            execution_reconciled = False
++            position_exists = False
++            position_id = None
++            fill_price = None
++            fill_timestamp = None
++        else:
++            state = "NO_ORDER_CONFIRMED"
++            reason = "LEDGER_NO_ORDER_AND_NO_OBSERVED_EXECUTION"
++            execution_reconciled = True
++            position_exists = False
++            position_id = None
++            fill_price = None
++            fill_timestamp = None
+ 
++    elif ledger_event == "PAPER_ORDER_INTENT_RECORDED":
+         if status in {"FILLED", "PARTIALLY_FILLED"}:
+-            if not isinstance(fill_price, (int, float)) or isinstance(fill_price, bool) or fill_price <= 0:
+-                errors.append(f"OBSERVED_FILL_PRICE_REQUIRED:{symbol}")
+-            if not isinstance(fill_timestamp, str) or not fill_timestamp:
+-                errors.append(f"OBSERVED_FILL_TIMESTAMP_REQUIRED:{symbol}")
++            if not observed_position:
++                state = "RECONCILIATION_CONFLICT"
++                reason = "OBSERVED_FILL_WITHOUT_OBSERVED_POSITION"
++                execution_reconciled = False
++                position_exists = False
++                position_id = None
++                fill_price = None
++                fill_timestamp = None
++            else:
++                state = "RECONCILED_EXECUTION"
++                reason = "LEDGER_INTENT_MATCHED_OBSERVED_EXECUTION"
++                execution_reconciled = True
++                position_exists = True
++                position_id = obs["position_id"]
++                fill_price = obs["fill_price"]
++                fill_timestamp = obs["fill_timestamp"]
++        elif status in {"PENDING"}:
++            state = "EXECUTION_PENDING"
++            reason = "LEDGER_INTENT_AWAITING_OBSERVED_EXECUTION"
++            execution_reconciled = False
++            position_exists = False
++            position_id = None
++            fill_price = None
++            fill_timestamp = None
++        elif status in {"REJECTED", "CANCELED"}:
++            state = "EXECUTION_NOT_FILLED"
++            reason = "LEDGER_INTENT_OBSERVED_NOT_FILLED"
++            execution_reconciled = True
++            position_exists = False
++            position_id = None
++            fill_price = None
++            fill_timestamp = None
+         else:
+-            if fill_price is not None or fill_timestamp is not None:
+-                errors.append(f"OBSERVED_FILL_PRESENT_FOR_NONFILL:{symbol}")
+-
+-    return len(errors) == 0, sorted(set(errors))
++            state = "RECONCILIATION_CONFLICT"
++            reason = "UNSUPPORTED_INTENT_OBSERVATION_COMBINATION"
++            execution_reconciled = False
++            position_exists = False
++            position_id = None
++            fill_price = None
++            fill_timestamp = None
++    else:
++        state = "RECONCILIATION_CONFLICT"
++        reason = "UNEXPECTED_LEDGER_EVENT"
++        execution_reconciled = False
++        position_exists = False
++        position_id = None
++        fill_price = None
++        fill_timestamp = None
++
++    decision = {
++        "symbol": symbol,
++        "ledger_event": ledger_event,
++        "observed_order_status": status,
++        "reconciliation_state": state,
++        "execution_reconciled": execution_reconciled,
++        "position_exists": position_exists,
++        "position_id": position_id,
++        "fill_price": fill_price,
++        "fill_timestamp": fill_timestamp,
++        "reason": reason,
++    }
++    return decision, state
+ 
+ 
+ def build_reconciliation(
+@@ -319,7 +452,9 @@ def build_reconciliation(
+ 
+     if not ledger_ok or not observed_ok:
+         result["blocked_reasons"] = sorted(set(ledger_errors + observed_errors))
+-        for symbol in SYMBOLS:
++        # Envelope-level failure -- scoped to REQUIRED_SYMBOLS only, same as
++        # the global gates that produced it.
++        for symbol in REQUIRED_SYMBOLS:
+             result["decisions"][symbol] = {
+                 "symbol": symbol,
+                 "ledger_event": None,
+@@ -340,108 +475,69 @@ def build_reconciliation(
+ 
+     reconciled_count = 0
+     pending_count = 0
+-    unverified_count = 0
+-    conflict_count = 0
+-
+-    for symbol in SYMBOLS:
+-        entry = ledger_entries[symbol]
+-        obs = observations[symbol]
+-        ledger_event = entry["ledger_event"]
+-        status = obs["order_status"]
+-        observed_position = obs["position_exists"]
+-
+-        if ledger_event == "NO_ORDER_RECORDED":
+-            if observed_position or status in {"FILLED", "PARTIALLY_FILLED", "PENDING"}:
+-                state = "RECONCILIATION_CONFLICT"
+-                reason = "OBSERVED_EXECUTION_WITHOUT_LEDGER_ORDER"
+-                conflict_count += 1
+-                execution_reconciled = False
+-                position_exists = False
+-                position_id = None
+-                fill_price = None
+-                fill_timestamp = None
+-            else:
+-                state = "NO_ORDER_CONFIRMED"
+-                reason = "LEDGER_NO_ORDER_AND_NO_OBSERVED_EXECUTION"
+-                reconciled_count += 1
+-                execution_reconciled = True
+-                position_exists = False
+-                position_id = None
+-                fill_price = None
+-                fill_timestamp = None
++    required_conflict_count = 0
++    optional_blocked_symbols: list[str] = []
++
++    # Every symbol reported by either upstream source gets reconciled;
++    # REQUIRED_SYMBOLS are added even if somehow absent (verify_ledger/
++    # verify_observed already gated a truly missing/invalid required
++    # symbol above, so this is just defensive). Mirrors the required-vs-
++    # optional pattern already shipped in v0.5.3.12-.17.
++    selected = sorted(
++        set(ledger_entries.keys()) | set(observations.keys()) | set(REQUIRED_SYMBOLS)
++    )
+ 
+-        elif ledger_event == "PAPER_ORDER_INTENT_RECORDED":
+-            if status in {"FILLED", "PARTIALLY_FILLED"}:
+-                if not observed_position:
+-                    state = "RECONCILIATION_CONFLICT"
+-                    reason = "OBSERVED_FILL_WITHOUT_OBSERVED_POSITION"
+-                    conflict_count += 1
+-                    execution_reconciled = False
+-                    position_exists = False
+-                    position_id = None
+-                    fill_price = None
+-                    fill_timestamp = None
+-                else:
+-                    state = "RECONCILED_EXECUTION"
+-                    reason = "LEDGER_INTENT_MATCHED_OBSERVED_EXECUTION"
+-                    reconciled_count += 1
+-                    execution_reconciled = True
+-                    position_exists = True
+-                    position_id = obs["position_id"]
+-                    fill_price = obs["fill_price"]
+-                    fill_timestamp = obs["fill_timestamp"]
+-            elif status in {"PENDING"}:
+-                state = "EXECUTION_PENDING"
+-                reason = "LEDGER_INTENT_AWAITING_OBSERVED_EXECUTION"
+-                pending_count += 1
+-                execution_reconciled = False
+-                position_exists = False
+-                position_id = None
+-                fill_price = None
+-                fill_timestamp = None
+-            elif status in {"REJECTED", "CANCELED"}:
+-                state = "EXECUTION_NOT_FILLED"
+-                reason = "LEDGER_INTENT_OBSERVED_NOT_FILLED"
+-                reconciled_count += 1
+-                execution_reconciled = True
+-                position_exists = False
+-                position_id = None
+-                fill_price = None
+-                fill_timestamp = None
++    for symbol in selected:
++        is_required = symbol in REQUIRED_SYMBOLS
++        entry = ledger_entries.get(symbol)
++        obs = observations.get(symbol)
++
++        if not is_required:
++            # Both sides were already verified for REQUIRED_SYMBOLS as a
++            # global gate above; an optional symbol's ledger entry and
++            # observation were not checked yet -- do it here so one
++            # optional symbol's bad/missing data never blocks another
++            # symbol's reconciliation. Consistent with this file's own
++            # fail-closed philosophy: a missing observation is never
++            # silently treated as reconciled, even for an optional symbol.
++            entry_errors = ledger_entry_reconciliation_errors_for_symbol(symbol, entry)
++            obs_errors = observation_errors_for_symbol(symbol, obs)
++            if entry_errors or obs_errors:
++                result["decisions"][symbol] = {
++                    "symbol": symbol,
++                    "ledger_event": entry.get("ledger_event") if isinstance(entry, dict) else None,
++                    "observed_order_status": obs.get("order_status") if isinstance(obs, dict) else None,
++                    "reconciliation_state": "BLOCKED",
++                    "execution_reconciled": False,
++                    "position_exists": False,
++                    "position_id": None,
++                    "fill_price": None,
++                    "fill_timestamp": None,
++                    "reason": "OPTIONAL_SYMBOL_INPUT_VALIDATION_FAILED",
++                }
++                optional_blocked_symbols.append(symbol)
++                continue
++
++        decision, state = reconcile_symbol(symbol, entry, obs)
++        result["decisions"][symbol] = decision
++
++        if state == "RECONCILIATION_CONFLICT":
++            if is_required:
++                required_conflict_count += 1
+             else:
+-                state = "RECONCILIATION_CONFLICT"
+-                reason = "UNSUPPORTED_INTENT_OBSERVATION_COMBINATION"
+-                conflict_count += 1
+-                execution_reconciled = False
+-                position_exists = False
+-                position_id = None
+-                fill_price = None
+-                fill_timestamp = None
++                # An optional symbol's own conflicting evidence blocks only
++                # that symbol's reconciliation, never the whole cycle.
++                optional_blocked_symbols.append(symbol)
++        elif state == "EXECUTION_PENDING":
++            pending_count += 1
+         else:
+-            state = "RECONCILIATION_CONFLICT"
+-            reason = "UNEXPECTED_LEDGER_EVENT"
+-            conflict_count += 1
+-            execution_reconciled = False
+-            position_exists = False
+-            position_id = None
+-            fill_price = None
+-            fill_timestamp = None
++            reconciled_count += 1
+ 
+-        result["decisions"][symbol] = {
+-            "symbol": symbol,
+-            "ledger_event": ledger_event,
+-            "observed_order_status": status,
+-            "reconciliation_state": state,
+-            "execution_reconciled": execution_reconciled,
+-            "position_exists": position_exists,
+-            "position_id": position_id,
+-            "fill_price": fill_price,
+-            "fill_timestamp": fill_timestamp,
+-            "reason": reason,
+-        }
++    if optional_blocked_symbols:
++        result["optional_symbols_blocked"] = sorted(set(optional_blocked_symbols))
+ 
+     result["decision_status"] = "DECIDED"
+-    if conflict_count:
++    if required_conflict_count:
+         result["overall_reconciliation"] = "CONFLICT"
+     elif pending_count and not reconciled_count:
+         result["overall_reconciliation"] = "PENDING"
+@@ -504,9 +600,19 @@ def print_report(result: dict[str, Any], output_path: Path) -> None:
+     print(f"STATE ID             : {result['state_id']}")
+     print()
+ 
+-    for symbol in SYMBOLS:
++    reported_symbols = sorted(set(result["decisions"].keys()) | set(REQUIRED_SYMBOLS))
++    optional_blocked = set(result.get("optional_symbols_blocked", []))
++
++    for symbol in reported_symbols:
+         item = result["decisions"].get(symbol)
+-        print(symbol)
++        label = symbol
++        if symbol in REQUIRED_SYMBOLS:
++            label += "  [REQUIRED]"
++        elif symbol in optional_blocked:
++            label += "  [OPTIONAL, BLOCKED -- did not affect overall decision]"
++        else:
++            label += "  [OPTIONAL]"
++        print(label)
+         if not item:
+             print("  RECONCILIATION     : BLOCKED")
+             print()
+@@ -549,7 +655,7 @@ def main() -> int:
+         except FileNotFoundError as observed_exc:
+             # Missing observation is UNVERIFIED only when the authenticated
+             # upstream ledger proves that NO order was recorded for every
+-            # symbol. Never manufacture execution evidence.
++            # REQUIRED symbol. Never manufacture execution evidence.
+             ledger_ok, ledger_errors = verify_ledger(ledger)
+ 
+             entries = ledger.get("ledger_entries")
+@@ -558,7 +664,7 @@ def main() -> int:
+                 and all(
+                     isinstance(entries.get(symbol), dict)
+                     and entries[symbol].get("ledger_event") == "NO_ORDER_RECORDED"
+-                    for symbol in SYMBOLS
++                    for symbol in REQUIRED_SYMBOLS
+                 )
+             )
+ 
+@@ -577,10 +683,26 @@ def main() -> int:
+                 result["overall_reconciliation"] = "UNVERIFIED"
+                 result["observed_execution_verified"] = False
+ 
+-                for symbol in SYMBOLS:
++                # Include any optional symbols the ledger reported too --
++                # with no observation source at all, every one of them is
++                # equally unverifiable, never silently upgraded to reconciled.
++                reported_symbols = (
++                    sorted(set(entries.keys()) | set(REQUIRED_SYMBOLS))
++                    if isinstance(entries, dict)
++                    else list(REQUIRED_SYMBOLS)
++                )
++
++                for symbol in reported_symbols:
++                    item = entries.get(symbol) if isinstance(entries, dict) else None
++                    ledger_event = item.get("ledger_event") if isinstance(item, dict) else None
++                    reason = (
++                        "NO_OBSERVATION_SOURCE_FOR_NO_ORDER"
++                        if ledger_event == "NO_ORDER_RECORDED"
++                        else "NO_OBSERVATION_SOURCE_AVAILABLE"
++                    )
+                     result["decisions"][symbol] = {
+                         "symbol": symbol,
+-                        "ledger_event": "NO_ORDER_RECORDED",
++                        "ledger_event": ledger_event,
+                         "observed_order_status": None,
+                         "reconciliation_state": "UNVERIFIED",
+                         "execution_reconciled": False,
+@@ -588,7 +710,7 @@ def main() -> int:
+                         "position_id": None,
+                         "fill_price": None,
+                         "fill_timestamp": None,
+-                        "reason": "NO_OBSERVATION_SOURCE_FOR_NO_ORDER",
++                        "reason": reason,
+                     }
+ 
+                 result = finalize(result)
+diff --git a/tests/test_aura_v05318_reconciliation.py b/tests/test_aura_v05318_reconciliation.py
+new file mode 100644
+index 0000000..4f0f1f4
+--- /dev/null
++++ b/tests/test_aura_v05318_reconciliation.py
+@@ -0,0 +1,307 @@
++"""
++Contract tests for AURA v0.5.3.18 Reconciliation.
++
++Covers the required-vs-optional symbol handling added on top of the
++original locked BTC/ETH-only architecture: REQUIRED_SYMBOLS (BTC/ETH)
++remain the only symbols whose structural invalidity or evidence conflict
++can block/gate the whole reconciliation decision (overall_reconciliation
++CONFLICT); every other symbol .17/observed-execution reports is
++reconciled independently, contributing positively (RECONCILED/PENDING)
++without being able to force the aggregate to CONFLICT.
++"""
++from __future__ import annotations
++
++import importlib.util
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def _load(module_filename: str, module_name: str):
++    spec = importlib.util.spec_from_file_location(module_name, ROOT / module_filename)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[module_name] = module
++    spec.loader.exec_module(module)  # type: ignore[union-attr]
++    return module
++
++
++recon = _load("aura_v05318_reconciliation.py", "aura_v05318_recon")
++
++REQUIRED_SYMBOLS = recon.REQUIRED_SYMBOLS
++
++
++def ledger_no_order() -> dict:
++    return {
++        "ledger_event": "NO_ORDER_RECORDED",
++        "position_exists": False,
++        "position_id": None,
++        "fill_price": None,
++        "fill_timestamp": None,
++    }
++
++
++def ledger_intent() -> dict:
++    return {
++        "ledger_event": "PAPER_ORDER_INTENT_RECORDED",
++        "position_exists": False,
++        "position_id": None,
++        "fill_price": None,
++        "fill_timestamp": None,
++    }
++
++
++def obs_none() -> dict:
++    # "Nothing happened" observation: not pending/filled, so a NO_ORDER_RECORDED
++    # ledger entry reconciles cleanly against it (PENDING would itself be a
++    # conflict against a symbol with no ledger order).
++    return {"order_status": "CANCELED", "position_exists": False, "position_id": None, "fill_price": None, "fill_timestamp": None}
++
++
++def obs_filled(price: float = 65000.0, position_id: str = "PAPER-1") -> dict:
++    return {
++        "order_status": "FILLED",
++        "position_exists": True,
++        "position_id": position_id,
++        "fill_price": price,
++        "fill_timestamp": "2026-09-01T00:05:00Z",
++    }
++
++
++def obs_rejected() -> dict:
++    return {"order_status": "REJECTED", "position_exists": False, "position_id": None, "fill_price": None, "fill_timestamp": None}
++
++
++def make_ledger_payload(entry_specs: dict) -> dict:
++    entries = {s: {"symbol": s, **v} for s, v in entry_specs.items() if v is not None}
++    payload = {
++        "agent_version": "AURA v0.5.3.17",
++        "engine": "DECISION_EXECUTION_LEDGER",
++        "decision_status": "DECIDED",
++        "overall_ledger_decision": "INTENTS_RECORDED",
++        "generated_from": "test-fixture",
++        "input_paper_execution_hash": "testfixturehash",
++        "upstream_state_id": "PE-testfixture0000000000",
++        "upstream_hash_verified": True,
++        "frozen_configuration_verified": True,
++        "ledger_entries": entries,
++        "blocked_reasons": [],
++        "guardrails": {
++            "single_source_of_truth": True,
++            "source_engine": "AURA v0.5.3.16",
++            "market_data_fetch": False,
++            "indicator_recalculation": False,
++            "signal_recalculation": False,
++            "risk_recalculation": False,
++            "position_sizing": False,
++            "position_creation": False,
++            "exchange_state_mutation": False,
++            "orders_allowed": False,
++            "paper_execution": False,
++            "live_execution": False,
++            "ledger_authorization": False,
++            "ledger_state_mutation": False,
++            "position_claim_from_ledger": False,
++            "fail_closed": True,
++        },
++    }
++    canonical = {
++        "agent_version": payload["agent_version"],
++        "engine": payload["engine"],
++        "decision_status": payload["decision_status"],
++        "overall_ledger_decision": payload["overall_ledger_decision"],
++        "input_paper_execution_hash": payload["input_paper_execution_hash"],
++        "upstream_state_id": payload["upstream_state_id"],
++        "upstream_hash_verified": payload["upstream_hash_verified"],
++        "frozen_configuration_verified": payload["frozen_configuration_verified"],
++        "ledger_entries": payload["ledger_entries"],
++        "blocked_reasons": payload["blocked_reasons"],
++    }
++    payload["state_hash"] = recon.sha256_text(recon.stable_json(canonical))
++    payload["state_id"] = f"LE-{payload['state_hash'][:24]}"
++    return payload
++
++
++def make_observed_payload(obs_specs: dict) -> dict:
++    observations = {s: v for s, v in obs_specs.items() if v is not None}
++    payload = {
++        "agent_version": "OBSERVED_EXECUTION_TEST_FIXTURE",
++        "engine": "OBSERVED_EXECUTION",
++        "snapshot_status": "OBSERVED",
++        "observations": observations,
++    }
++    canonical = {
++        "agent_version": payload["agent_version"],
++        "engine": payload["engine"],
++        "snapshot_status": payload["snapshot_status"],
++        "observations": payload["observations"],
++    }
++    payload["snapshot_hash"] = recon.sha256_text(recon.stable_json(canonical))
++    return payload
++
++
++def run(entry_specs: dict, obs_specs: dict) -> dict:
++    ledger_payload = make_ledger_payload(entry_specs)
++    observed_payload = make_observed_payload(obs_specs)
++    return recon.build_reconciliation(
++        ledger_payload, observed_payload, Path("ledger-fixture.json"), Path("observed-fixture.json")
++    )
++
++
++# ---------------------------------------------------------------------------
++# Required-pair (BTC/ETH) baseline behavior -- unchanged from the original
++# architecture.
++# ---------------------------------------------------------------------------
++
++
++def test_no_order_and_no_observation_on_required_pair_is_reconciled():
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order()},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none()},
++    )
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_reconciliation"] == "RECONCILED"
++    for symbol in REQUIRED_SYMBOLS:
++        assert result["decisions"][symbol]["reconciliation_state"] == "NO_ORDER_CONFIRMED"
++
++
++def test_intent_matched_by_observed_fill_on_required_pair_is_reconciled():
++    result = run(
++        {"BTC/USD": ledger_intent(), "ETH/USD": ledger_no_order()},
++        {"BTC/USD": obs_filled(), "ETH/USD": obs_none()},
++    )
++
++    assert result["overall_reconciliation"] == "RECONCILED"
++    assert result["decisions"]["BTC/USD"]["reconciliation_state"] == "RECONCILED_EXECUTION"
++    assert result["decisions"]["BTC/USD"]["position_exists"] is True
++
++
++def test_missing_required_ledger_entry_blocks_whole_decision():
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": None},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none()},
++    )
++
++    assert result["overall_reconciliation"] == "BLOCKED"
++    assert any("MISSING_OR_INVALID_SYMBOL:ETH/USD" in r for r in result["blocked_reasons"])
++
++
++def test_required_symbol_conflict_gates_overall_to_conflict():
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order()},
++        {"BTC/USD": obs_filled(), "ETH/USD": obs_none()},  # fill with no ledger order == conflict
++    )
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_reconciliation"] == "CONFLICT"
++    assert result["decisions"]["BTC/USD"]["reconciliation_state"] == "RECONCILIATION_CONFLICT"
++
++
++# ---------------------------------------------------------------------------
++# Optional (all-coin-universe) symbol handling
++# ---------------------------------------------------------------------------
++
++
++def test_optional_symbol_reconciled_independently_and_contributes_to_overall():
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order(), "AVAX/USD": ledger_intent()},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none(), "AVAX/USD": obs_filled()},
++    )
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_reconciliation"] == "RECONCILED"
++    assert result["decisions"]["AVAX/USD"]["reconciliation_state"] == "RECONCILED_EXECUTION"
++    assert "optional_symbols_blocked" not in result
++
++
++def test_optional_symbol_conflict_does_not_gate_overall_to_conflict():
++    # AVAX has an observed fill with no matching ledger order -- a genuine
++    # conflict for AVAX -- but the required pair is clean. Overall must stay
++    # RECONCILED, not CONFLICT: an optional symbol's bad evidence must never
++    # force the whole cycle into CONFLICT.
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order(), "AVAX/USD": ledger_no_order()},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none(), "AVAX/USD": obs_filled()},
++    )
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_reconciliation"] == "RECONCILED"
++    assert result["decisions"]["AVAX/USD"]["reconciliation_state"] == "RECONCILIATION_CONFLICT"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++    assert result["decisions"]["BTC/USD"]["reconciliation_state"] == "NO_ORDER_CONFIRMED"
++
++
++def test_optional_symbol_missing_observation_is_blocked_not_globally():
++    # This file's own philosophy: never silently treat a missing observation
++    # as reconciled, even for an optional symbol with an order intent.
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order(), "AVAX/USD": ledger_intent()},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none()},  # no AVAX observation at all
++    )
++
++    assert result["decision_status"] == "DECIDED"
++    assert result["overall_reconciliation"] == "RECONCILED"
++    assert result["decisions"]["AVAX/USD"]["reconciliation_state"] == "BLOCKED"
++    assert result.get("optional_symbols_blocked") == ["AVAX/USD"]
++
++
++def test_full_coin_universe_optional_symbols_evaluated_independently():
++    result = run(
++        {
++            "BTC/USD": ledger_no_order(),
++            "ETH/USD": ledger_no_order(),
++            "AVAX/USD": ledger_intent(),
++            "SOL/USD": ledger_intent(),
++        },
++        {
++            "BTC/USD": obs_none(),
++            "ETH/USD": obs_none(),
++            "AVAX/USD": obs_filled(),
++            "SOL/USD": obs_rejected(),
++        },
++    )
++
++    assert result["overall_reconciliation"] == "RECONCILED"
++    assert result["decisions"]["AVAX/USD"]["reconciliation_state"] == "RECONCILED_EXECUTION"
++    assert result["decisions"]["SOL/USD"]["reconciliation_state"] == "EXECUTION_NOT_FILLED"
++    assert "optional_symbols_blocked" not in result
++
++
++# ---------------------------------------------------------------------------
++# print_report() smoke test -- must not reference the old fixed SYMBOLS tuple
++# ---------------------------------------------------------------------------
++
++
++def test_print_report_covers_all_reported_symbols_including_optional(capsys):
++    result = run(
++        {"BTC/USD": ledger_no_order(), "ETH/USD": ledger_no_order(), "AVAX/USD": ledger_no_order()},
++        {"BTC/USD": obs_none(), "ETH/USD": obs_none(), "AVAX/USD": obs_filled()},
++    )
++
++    recon.print_report(result, Path("test-output.json"))
++    out = capsys.readouterr().out
++
++    assert "BTC/USD  [REQUIRED]" in out
++    assert "ETH/USD  [REQUIRED]" in out
++    assert "AVAX/USD  [OPTIONAL, BLOCKED" in out
++
++
++# ---------------------------------------------------------------------------
++# main()'s missing-observation-file fallback path (REQUIRED_SYMBOLS-scoped
++# no_order_only check, extended to report optional symbols too)
++# ---------------------------------------------------------------------------
++
++
++def test_no_order_only_check_scoped_to_required_symbols():
++    entries = {
++        "BTC/USD": {"symbol": "BTC/USD", **ledger_no_order()},
++        "ETH/USD": {"symbol": "ETH/USD", **ledger_no_order()},
++        "AVAX/USD": {"symbol": "AVAX/USD", **ledger_intent()},
++    }
++    no_order_only = all(
++        isinstance(entries.get(symbol), dict) and entries[symbol].get("ledger_event") == "NO_ORDER_RECORDED"
++        for symbol in REQUIRED_SYMBOLS
++    )
++    # An optional symbol having an intent must not affect the required-only check.
++    assert no_order_only is True
+-- 
+2.43.0
+

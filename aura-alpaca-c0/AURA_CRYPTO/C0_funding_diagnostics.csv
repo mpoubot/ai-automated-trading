@@ -1,0 +1,2 @@
+trades,funding_return_mean,funding_return_median,funding_rate_sum_mean,funding_rate_max_abs_mean,corr_funding_return_mae,corr_funding_return_net,corr_funding_rate_sum_mae,corr_funding_rate_sum_net
+109,-2.3587155963302748e-05,-2.7e-05,2.3587155963302748e-05,4.6623853211009186e-05,-0.2651514496109941,-0.05467504777628984,0.2651514496109941,0.05467504777628984

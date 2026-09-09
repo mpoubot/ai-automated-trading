@@ -1,0 +1,1 @@
+position_id,signal_id,model,symbol,status,entry_date,entry_price_raw,entry_price_simulated,entry_atr,stop_price,target_price,sessions_held,exit_date,exit_type,exit_price_raw,exit_price_simulated,gross_return,slippage_return_penalty,commission_return_penalty,net_return,mfe,mae,capital_days,mfe_capture_ratio,created_at,updated_at

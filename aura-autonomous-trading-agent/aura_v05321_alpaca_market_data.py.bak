@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""AURA v0.5.3.21 — Alpaca crypto closed-1H market-data adapter.
+
+Paper-runtime data adapter only. It fetches BTC/USD and ETH/USD from Alpaca
+Crypto Historical Data and writes the canonical CLOSED 1H OHLCV CSV consumed
+by v0.5.3.12. It never submits an order and never mutates account state.
+
+Credentials are read only from ALPACA_PAPER_API_KEY and
+ALPACA_PAPER_SECRET_KEY (or ALPACA_API_KEY / ALPACA_SECRET_KEY as fallback).
+"""
+from __future__ import annotations
+import argparse, os, sys
+from pathlib import Path
+import pandas as pd
+
+SYMBOLS = ["BTC/USD", "ETH/USD"]
+DEFAULT_OUTPUT = Path(r"data\prospective_alpaca\alpaca_1h_closed_bars.csv")
+BARS = 240
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    p.add_argument("--bars", type=int, default=BARS)
+    args = p.parse_args()
+
+    key = os.getenv("ALPACA_PAPER_API_KEY") or os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_PAPER_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
+    if not key or not secret:
+        print("FAIL-CLOSED: Alpaca credentials are missing.", file=sys.stderr)
+        return 2
+
+    try:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+        from alpaca.data.requests import CryptoBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        client = CryptoHistoricalDataClient(api_key=key, secret_key=secret)
+        request = CryptoBarsRequest(symbol_or_symbols=SYMBOLS, timeframe=TimeFrame.Hour, limit=args.bars)
+        bars = client.get_crypto_bars(request)
+        df = bars.df.reset_index()
+        if df.empty:
+            raise RuntimeError("Alpaca returned no crypto bars")
+        if "symbol" not in df.columns or "timestamp" not in df.columns:
+            raise RuntimeError("Alpaca response missing symbol/timestamp")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        now = pd.Timestamp.now(tz="UTC")
+        # Never pass the currently forming hour downstream.
+        current_hour = now.floor("h")
+        df = df[df["timestamp"] < current_hour].copy()
+        df = df[df["symbol"].isin(SYMBOLS)]
+        df = df[["timestamp", "symbol", "open", "high", "low", "close", "volume"]]
+        df = df.sort_values(["symbol", "timestamp"]).drop_duplicates(["symbol", "timestamp"])
+        if df.empty:
+            raise RuntimeError("No CLOSED 1H crypto bars available")
+        # Keep the same trailing window per symbol and require both assets.
+        frames = []
+        for symbol in SYMBOLS:
+            g = df[df["symbol"] == symbol].tail(args.bars)
+            if g.empty:
+                raise RuntimeError(f"Missing closed bars for {symbol}")
+            frames.append(g)
+        out = pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"])
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(args.output, index=False)
+        print("=" * 80)
+        print("AURA v0.5.3.21 — ALPACA CLOSED 1H DATA")
+        print("MODE: PAPER DATA ONLY / NO ORDERS")
+        print(f"OUTPUT: {args.output.resolve()}")
+        for symbol in SYMBOLS:
+            g = out[out["symbol"] == symbol]
+            print(f"{symbol}: {len(g)} closed bars; latest={g['timestamp'].max().isoformat()}")
+        print("=" * 80)
+        return 0
+    except Exception as exc:
+        print(f"FAIL-CLOSED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())

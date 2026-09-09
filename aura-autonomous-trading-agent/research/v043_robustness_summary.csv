@@ -1,0 +1,2 @@
+selected_relationship,train_signals,train_symbols,test_periods,eligible_test_periods,total_test_signals,mean_lift_vs_raw,median_lift_vs_raw,positive_rate_lift_vs_raw,periods_positive_median_lift,periods_positive_rate_lift,unseen_symbol_median_lift,unseen_symbol_mean_lift,unseen_symbol_positive_rate_lift,robustness_score,robust
+BULL_DIV_RSI_VOLUME,297,27,3,3,101,-6.896270057828804e-05,-0.00035736459042802943,-0.019303857934364215,1,1,-0.0024288174580701094,0.0038961466224433734,-0.03548704741705799,-0.004045722597767857,False

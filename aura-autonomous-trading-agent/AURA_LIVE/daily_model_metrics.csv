@@ -1,0 +1,4 @@
+date,model,closed_trades,open_positions,gross_mean,net_mean,net_median,win_rate,profit_factor,max_drawdown,mean_mfe,mean_mae,mfe_mae_ratio,capital_efficiency,mfe_capture_ratio,baseline_mean,net_lift_vs_baseline,created_at
+2026-08-26,A_10D_TIME,0,0,,,,,,,,,,,,,,2026-08-26T12:54:28.064280+00:00
+2026-08-26,B_PURE_ATR_2x4x,0,0,,,,,,,,,,,,,,2026-08-26T12:54:28.069475+00:00
+2026-08-26,C_ATR_2x4x_10D,0,0,,,,,,,,,,,,,,2026-08-26T12:54:28.081126+00:00
