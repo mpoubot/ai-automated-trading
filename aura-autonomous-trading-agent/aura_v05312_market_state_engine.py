@@ -69,7 +69,15 @@ SYMBOLS = ("BTC/USD", "ETH/USD")
 REQUIRED_SYMBOLS = ("BTC/USD", "ETH/USD")
 
 # Frozen research configuration — DO NOT CHANGE in this layer.
-FROZEN_CANDIDATE = "BEAR x LOW ATR x POSITIVE bar-2"
+# Must exactly equal what regime_state's f-string below can actually
+# produce ("{trend} x {atr_regime} x {bar2_regime}", three tokens). The
+# original value here ("BEAR x LOW ATR x POSITIVE bar-2") baked the
+# human-readable qualifiers ("ATR", "bar-2") into the literal comparison
+# string, so it could never match any real regime_state and
+# frozen_candidate_match was always False -- confirmed via a 2026-09-11
+# architecture audit and fixed the same day. See MIRROR_CANDIDATE in
+# v0.5.3.13, which already used the correct three-token format.
+FROZEN_CANDIDATE = "BEAR x LOW x POSITIVE"
 FROZEN_ATR_THRESHOLD_PCT = 0.596
 FROZEN_EMA_PERIOD_4H = 50
 ATR_PERIOD_1H = 14

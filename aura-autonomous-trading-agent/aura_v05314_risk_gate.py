@@ -71,7 +71,10 @@ REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
 # unambiguously -- mirrors the same alias in v0.5.3.13.
 
 # Locked research configuration inherited from v0.5.3.12 / v0.5.3.13.
-FROZEN_CANDIDATE = "BEAR x LOW ATR x POSITIVE bar-2"
+# Corrected 2026-09-11 to match the fix in those two modules (this copy
+# is currently display-only here -- see VERSION dump -- but is kept in
+# sync since it is documented as inherited from them).
+FROZEN_CANDIDATE = "BEAR x LOW x POSITIVE"
 FROZEN_ATR_THRESHOLD_PCT = 0.596
 FROZEN_EMA_PERIOD_4H = 50
 FROZEN_ATR_PERIOD_1H = 14
@@ -277,9 +280,11 @@ def candidate_consistency_errors_for_symbol(
     """
     Check that SIGNAL_CANDIDATE/NO_SIGNAL/BLOCKED means exactly what
     v0.5.3.13 says it means, for a single symbol. No indicator is
-    recomputed. Applies identically to the frozen candidate and the mirror
-    candidate -- v0.5.3.13 already normalizes both to the same reason
-    strings, so this check does not need to know which candidate matched.
+    recomputed. Applies to both the frozen candidate and the mirror
+    candidate -- as of 2026-09-11, v0.5.3.13 reports a distinct reason for
+    each (FROZEN_CANDIDATE_MATCH / MIRROR_CANDIDATE_MATCH) so the audit
+    trail can tell them apart; this check accepts either one for
+    SIGNAL_CANDIDATE without needing to know which candidate matched.
     """
     errors: list[str] = []
 
@@ -293,7 +298,7 @@ def candidate_consistency_errors_for_symbol(
     if d == "SIGNAL_CANDIDATE":
         if match is not True:
             errors.append(f"CANDIDATE_MATCH_FLAG_INCONSISTENT:{symbol}")
-        if reason != "FROZEN_CANDIDATE_MATCH":
+        if reason not in ("FROZEN_CANDIDATE_MATCH", "MIRROR_CANDIDATE_MATCH"):
             errors.append(f"CANDIDATE_REASON_INCONSISTENT:{symbol}")
 
     elif d == "NO_SIGNAL":

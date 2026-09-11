@@ -72,7 +72,13 @@ REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH remain the only symbols that can ever
 # (aliased to SYMBOLS) so the rest of this file reads unambiguously.
 
 # Locked research configuration. These values must agree with v0.5.3.12.
-FROZEN_CANDIDATE = "BEAR x LOW ATR x POSITIVE bar-2"
+# Corrected 2026-09-11: must be the exact three-token format regime_state
+# can actually take ("{trend} x {atr_regime} x {bar2_regime}"); the old
+# value ("BEAR x LOW ATR x POSITIVE bar-2") could never match any real
+# regime_state, so frozen_candidate_match/candidate_match were always
+# False for this candidate. MIRROR_CANDIDATE below already used the
+# correct format, which is how it was able to match live output.
+FROZEN_CANDIDATE = "BEAR x LOW x POSITIVE"
 FROZEN_ATR_THRESHOLD_PCT = 0.596
 FROZEN_EMA_PERIOD_4H = 50
 FROZEN_ATR_PERIOD_1H = 14
@@ -342,7 +348,17 @@ def evaluate_symbol(symbol: str, item: dict[str, Any]) -> dict[str, Any]:
 
     if is_recognized:
         result["decision"] = "SIGNAL_CANDIDATE"
-        result["reason"] = "FROZEN_CANDIDATE_MATCH"
+        # Distinct reason per matched candidate (changed 2026-09-11 -- see
+        # v0.5.3.14's candidate_consistency_errors_for_symbol(), which was
+        # updated in the same pass to accept either reason string here).
+        # Previously both candidates were reported as "FROZEN_CANDIDATE_MATCH"
+        # so the audit trail could not tell them apart; direction is still
+        # never decided here or by v0.5.3.14 -- only v0.5.3.23's explicit,
+        # separately reviewed allowlists ever assign BUY/SELL.
+        if regime_state == FROZEN_CANDIDATE:
+            result["reason"] = "FROZEN_CANDIDATE_MATCH"
+        else:
+            result["reason"] = "MIRROR_CANDIDATE_MATCH"
     else:
         result["decision"] = "NO_SIGNAL"
         result["reason"] = "FROZEN_CANDIDATE_NOT_PRESENT"

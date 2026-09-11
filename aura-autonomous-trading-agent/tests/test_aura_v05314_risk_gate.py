@@ -35,11 +35,15 @@ REQUIRED_SYMBOLS = gate.REQUIRED_SYMBOLS
 MIRROR_CANDIDATE = "BULL_OR_NEUTRAL x LOW x NON_POSITIVE"
 
 
-def signal_candidate(timestamp: str = "2026-09-01T00:00:00Z", regime_state: str = FROZEN_CANDIDATE) -> dict:
+def signal_candidate(
+    timestamp: str = "2026-09-01T00:00:00Z",
+    regime_state: str = FROZEN_CANDIDATE,
+    reason: str = "FROZEN_CANDIDATE_MATCH",
+) -> dict:
     return {
         "decision": "SIGNAL_CANDIDATE",
         "candidate_match": True,
-        "reason": "FROZEN_CANDIDATE_MATCH",
+        "reason": reason,
         "regime_state": regime_state,
         "state_timestamp": timestamp,
     }
@@ -176,17 +180,28 @@ def test_required_symbol_unexpected_upstream_decision_blocks_whole_decision():
 
 
 def test_mirror_candidate_regime_state_still_passes_required_consistency_check():
-    # .13 normalizes both FROZEN_CANDIDATE and MIRROR_CANDIDATE to the same
-    # decision/candidate_match/reason contract -- .14 must not need to know
-    # which candidate matched.
+    # Changed 2026-09-11: .13 now reports a distinct reason per candidate
+    # (FROZEN_CANDIDATE_MATCH / MIRROR_CANDIDATE_MATCH) so the audit trail
+    # can tell them apart -- .14 accepts either one for SIGNAL_CANDIDATE
+    # without needing to know which candidate matched.
     result = run({
-        "BTC/USD": signal_candidate(regime_state=MIRROR_CANDIDATE),
+        "BTC/USD": signal_candidate(regime_state=MIRROR_CANDIDATE, reason="MIRROR_CANDIDATE_MATCH"),
         "ETH/USD": no_signal(),
     })
 
     assert result["decision_status"] == "DECIDED"
     assert result["overall_risk_decision"] == "RISK_PASS"
     assert result["decisions"]["BTC/USD"]["risk_decision"] == "RISK_PASS"
+
+
+def test_unrecognized_reason_for_signal_candidate_is_inconsistent():
+    # Regression coverage for the 2026-09-11 change: SIGNAL_CANDIDATE must
+    # carry one of the two known reasons, not an arbitrary string.
+    bad = signal_candidate(reason="SOMETHING_ELSE")
+    result = run({"BTC/USD": bad, "ETH/USD": no_signal()})
+
+    assert result["decision_status"] == "BLOCKED"
+    assert "CANDIDATE_REASON_INCONSISTENT:BTC/USD" in result["blocked_reasons"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +244,7 @@ def test_full_coin_universe_optional_symbols_evaluated_independently():
     result = run({
         "BTC/USD": signal_candidate(),
         "ETH/USD": no_signal(),
-        "AVAX/USD": signal_candidate(regime_state=MIRROR_CANDIDATE, timestamp="2026-08-20T00:00:00Z"),
+        "AVAX/USD": signal_candidate(regime_state=MIRROR_CANDIDATE, reason="MIRROR_CANDIDATE_MATCH", timestamp="2026-08-20T00:00:00Z"),
         "SOL/USD": no_signal(timestamp="2026-08-15T00:00:00Z"),
     })
 

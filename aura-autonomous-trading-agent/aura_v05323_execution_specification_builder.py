@@ -42,9 +42,11 @@ A symbol's v0.5.3.13 `regime_state` label produces:
 
 Both allowlists are EMPTY by default.
 
-In particular: "BEAR x LOW ATR x POSITIVE bar-2" — the only frozen
-candidate v0.5.3.13 currently evaluates — is NOT a member of either
-set. The research record for this candidate (the frozen v0.4.8
+In particular: "BEAR x LOW x POSITIVE" (FROZEN_CANDIDATE; corrected
+2026-09-11 from the unmatchable "BEAR x LOW ATR x POSITIVE bar-2" -- see
+v0.5.3.12/.13) — the only frozen candidate v0.5.3.13 currently evaluates —
+is NOT a member of either set. The research record for this candidate
+(the frozen v0.4.8
 long-only EMA3/EMA8 + MACD + relative-volume hypothesis is a separate,
 unrelated research track) does not establish a validated executable
 direction for the BEAR regime label. A BEAR regime label therefore
@@ -109,9 +111,9 @@ REQUIRED_SYMBOLS = SYMBOLS  # BTC/ETH are always considered even if somehow
 # needs no new required-vs-optional gating logic, only a wider loop.
 
 # --- Direction policy: explicit, closed, empty by default. -----------------
-# Do not add "BEAR x LOW ATR x POSITIVE bar-2" to either set without a
-# reviewed, documented research decision. This module must never infer a
-# direction from a regime label on its own.
+# Do not add "BEAR x LOW x POSITIVE" (FROZEN_CANDIDATE) to either set
+# without a reviewed, documented research decision. This module must never
+# infer a direction from a regime label on its own.
 VALIDATED_LONG_ENTRY_REGIME_LABELS: frozenset[str] = frozenset()
 VALIDATED_SHORT_ENTRY_REGIME_LABELS: frozenset[str] = frozenset()
 

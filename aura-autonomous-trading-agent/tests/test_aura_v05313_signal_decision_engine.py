@@ -138,9 +138,13 @@ def test_mirror_candidate_alone_is_also_signal_candidate():
     btc = decision["decisions"]["BTC/USD"]
     assert btc["decision"] == "SIGNAL_CANDIDATE"
     assert btc["candidate_match"] is True
-    # Downstream (.14/.23) literal-string contract must be preserved even
-    # for the mirror candidate -- direction is never decided here.
-    assert btc["reason"] == "FROZEN_CANDIDATE_MATCH"
+    # Changed 2026-09-11: the mirror candidate now gets its own distinct
+    # reason so the audit trail can tell it apart from FROZEN_CANDIDATE --
+    # v0.5.3.14's candidate_consistency_errors_for_symbol() was updated in
+    # the same pass to accept either string for SIGNAL_CANDIDATE. Direction
+    # is still never decided here (or by .14) -- only .23's explicit,
+    # separately reviewed allowlists ever assign BUY/SELL.
+    assert btc["reason"] == "MIRROR_CANDIDATE_MATCH"
 
     eth = decision["decisions"]["ETH/USD"]
     assert eth["decision"] == "NO_SIGNAL"
