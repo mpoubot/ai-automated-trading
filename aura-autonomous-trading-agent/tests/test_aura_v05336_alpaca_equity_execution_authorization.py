@@ -555,9 +555,22 @@ def test_authorized_order_request_replay_returns_already_consumed(tmp_path) -> N
     expect("replay produces no order_spec", second["order_spec"] is None)
 
 
-def test_revalidation_failure_leaves_claim_permanently_consumed(tmp_path) -> None:
-    """A claim that led to a blocked revalidation must remain consumed --
-    no retry path for the same authorization_id under any outcome."""
+def test_revalidation_failure_before_claim_leaves_authorization_retryable(tmp_path) -> None:
+    """v0.5.3.40 REORDERING: authorized_order_request() now revalidates
+    BEFORE claiming (previously claim -> revalidate -> construct; now
+    revalidate -> claim -> construct), specifically so a spec that is
+    already stale/blocked at revalidation time never burns a .37 claim
+    slot at all (Martin's explicit .40 instruction: "Do not permanently
+    consume an authorization merely because an already-stale
+    authorization reached the revalidation stage"). Since revalidation
+    fails here (expired), NOTHING is ever claimed -- the
+    authorization_id is therefore still genuinely available afterward, so
+    a direct claim attempt on it must succeed, not report
+    ALREADY_CLAIMED. This intentionally reverses this test's
+    pre-v0.5.3.40 expectation (previously: a blocked revalidation left a
+    claim permanently consumed with no retry path, because under the OLD
+    claim -> revalidate -> construct order the claim was taken before
+    revalidation ever ran)."""
     spec = make_spec(asset_class="STOCK", direction="OPEN_LONG", symbol="AAPL")
     asset = make_asset(symbol="AAPL")
     claims_dir = claims(tmp_path)
@@ -569,10 +582,13 @@ def test_revalidation_failure_leaves_claim_permanently_consumed(tmp_path) -> Non
 
     first = AUTH.authorized_order_request(record, spec, asset, claims_dir, now=later)
     expect("first attempt fails on expiry", first["status"] == "REVALIDATION_FAILED")
+    expect("first attempt fails specifically on expiry, not some other guardrail",
+           first["reason"] == "EXPIRED_AUTHORIZATION")
 
-    second = AUTH.authorized_order_request(record, spec, asset, claims_dir)
-    expect("retry after failed revalidation is still consumed, not retried",
-           second["status"] == "AUTHORIZATION_ALREADY_CONSUMED")
+    replay37 = AUTH._load_replay_module()
+    retry = replay37.claim(record, claims_dir=claims_dir)
+    expect("nothing was claimed when revalidation was blocked before the claim step (v0.5.3.40)",
+           retry["granted"] is True)
 
 
 # ======================================================================= #

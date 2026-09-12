@@ -346,12 +346,21 @@ def test_kill_switch_at_final_boundary_prevents_submission() -> None:
         expect("18: revalidation fails once the kill switch is engaged", result["status"] == "REVALIDATION_FAILED" and result["reason"] == "KILL_SWITCH_ENGAGED")
         expect("18: the exchange was never called", fake.create_order_calls == [])
 
-        # The authorization_id claim is still permanently consumed -- no
-        # retry. authorized_submit() claims through v0.5.3.32 now (not the
-        # bare marker file), so the retry check goes through .32 too.
+        # v0.5.3.40 REORDERING: authorized_submit() now revalidates
+        # BEFORE claiming (previously claim -> revalidate -> submit; now
+        # revalidate -> claim -> submit), specifically so a spec that is
+        # already stale/blocked at revalidation time never burns a claim
+        # slot at all (Martin's explicit .40 instruction: "Do not
+        # permanently consume an authorization merely because an
+        # already-stale authorization reached the revalidation stage").
+        # Since revalidation failed here, NOTHING was ever claimed -- the
+        # authorization_id is therefore still genuinely available, and a
+        # fresh claim attempt on it must succeed, not report
+        # ALREADY_CLAIMED. This intentionally reverses this test's
+        # pre-v0.5.3.40 expectation.
         retry = REPLAY.claim(record["authorization_id"], BASE_SPEC["client_order_id"], claims_dir=tmp / "auth_claims")
-        expect("18: the authorization_id claim remains permanently consumed after the blocked revalidation",
-               retry["granted"] is False and retry["reason"] == "ALREADY_CLAIMED")
+        expect("18: nothing was claimed when revalidation was blocked before the claim step (v0.5.3.40)",
+               retry["granted"] is True)
 
 
 # ======================================================================= #

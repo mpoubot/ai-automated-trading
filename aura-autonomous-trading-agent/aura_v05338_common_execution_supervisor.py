@@ -460,6 +460,60 @@ def _load_mexc_authorization_module():
     return _load_module("aura_v05331_mexc_execution_authorization", "aura_v05331_mexc_execution_authorization.py")
 
 
+def _load_revalidation_module():
+    return _load_module("aura_v05340_pre_submission_revalidation", "aura_v05340_pre_submission_revalidation.py")
+
+
+def _audit_write_best_effort(revalidation40: Any, fn_name: str, *args: Any, **kwargs: Any) -> None:
+    """v0.5.3.40 audit-trail writes are best-effort, never safety-
+    relevant -- same helper, same rationale, as .31's/.36's own
+    _audit_write_best_effort() (Martin's explicit .40 completion-report
+    decision: "best-effort audit writes"). This module's own two direct
+    .40 write call sites (Alpaca SUBMISSION_ATTEMPTED/OUTCOME -- the only
+    events .36 itself never writes, since .36 never calls .35.submit())
+    are structurally protected from the concurrent-race case by the
+    never-released Supervisor-level client_order_id claim above them, but
+    are wrapped here anyway for defense-in-depth and consistency with
+    every other .40 write call site in this codebase. Swallows ONLY
+    IllegalTransitionError, never AuditTrailError."""
+    fn = getattr(revalidation40, fn_name)
+    try:
+        fn(*args, **kwargs)
+    except revalidation40.IllegalTransitionError:
+        pass
+
+
+def _record_decision_idempotent(revalidation40: Any, client_order_id: str, *, venue: str, asset_class: str,
+                                 symbol: str, spec_fingerprint: str, base_dir: Path) -> dict[str, Any]:
+    """Wraps `.40.record_decision()` with the SAME crash-retry discipline
+    already established for `.29.create_intent()` (module docstring §4):
+    attempt the create optimistically, and on AUDIT_RECORD_ALREADY_EXISTS
+    (this Supervisor re-entering for a client_order_id whose DECISION
+    event was already durably recorded on an earlier attempt -- there is
+    no `.29`-equivalent ledger on the Alpaca side to short-circuit on
+    first, so this module itself is the only thing that can tell a crash
+    retry apart from a genuine new decision), fall back to reading the
+    existing record instead of treating it as an error. A caller passing
+    a spec_fingerprint that disagrees with an existing record's own
+    DECISION event is not specially detected here -- that mismatch would
+    mean two DIFFERENT canonical specs collided on the same
+    client_order_id, which `.33`'s own deterministic-fingerprint
+    construction (decision_id/symbol/direction/signal_timestamp) is
+    designed to make structurally unreachable in the first place."""
+    try:
+        return revalidation40.record_decision(
+            client_order_id, venue=venue, asset_class=asset_class, symbol=symbol,
+            spec_fingerprint=spec_fingerprint, base_dir=base_dir,
+        )
+    except revalidation40.AuditTrailError as exc:
+        if "AUDIT_RECORD_ALREADY_EXISTS" not in str(exc):
+            raise
+        existing = revalidation40.get_record(client_order_id, base_dir=base_dir)
+        if existing is None:
+            raise
+        return existing
+
+
 # --------------------------------------------------------------------- #
 # Result helpers -- one common shape for every SupervisionResult, so
 # determinism/audit fields (§12 of the GO message) are always present,
@@ -549,18 +603,40 @@ def supervise_alpaca_equity_execution(
     alpaca_client: Any = None,
     supervisor_config: dict[str, Any] | None = None,
     now_dt: datetime | None = None,
+    price_fetch_fn: Any = None,
+    max_quote_age_seconds: float | None = None,
+    max_price_drift_bps: float | None = None,
+    max_revalidation_to_submission_seconds: float | None = None,
+    audit_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The single entry point for a NEW Alpaca STOCK/ETF execution
     decision. Sequence: canonical spec self-consistency -> venue/asset-
-    class gate -> `.34` instrument-metadata resolution -> Supervisor kill
-    switch -> `.36.authorize()` -> `.36.authorized_order_request()` (which
-    itself claims via `.37` and constructs, never submits) -> this
-    module's OWN local client_order_id claim -> (optionally)
-    `.35.submit()`, wrapped to classify any exception as EXECUTION_UNCERTAIN
-    (module docstring §2). Never bypasses `.33`/authorization/replay
-    protection/adapter validation -- there is no earlier return path that
-    reaches `order_spec`/submission without every one of those succeeding
-    first (module docstring §6, "no bypass path")."""
+    class gate -> (opt-in v0.5.3.40) unified audit-trail DECISION event,
+    written only once the spec is confirmed to genuinely be routed as an
+    Alpaca equity spec -> `.34` instrument-metadata resolution ->
+    Supervisor kill switch ->
+    `.36.authorize()` -> `.36.authorized_order_request()` (which itself
+    revalidates -- including, when `price_fetch_fn` is supplied, a live
+    v0.5.3.40 price check -- then claims via `.37` and constructs, never
+    submits) -> this module's OWN local client_order_id claim -> (opt-in
+    v0.5.3.40) the revalidation-to-submission ceiling check -> (only
+    then, with NO intervening logic) `.35.submit()`, wrapped to classify
+    any exception as EXECUTION_UNCERTAIN (module docstring §2). Never
+    bypasses `.33`/authorization/replay protection/adapter validation --
+    there is no earlier return path that reaches `order_spec`/submission
+    without every one of those succeeding first (module docstring §6, "no
+    bypass path").
+
+    price_fetch_fn/max_quote_age_seconds/max_price_drift_bps/
+    max_revalidation_to_submission_seconds/audit_dir are ALL additive and
+    opt-in (v0.5.3.40): every one defaults to None, and when every one is
+    None this function's behavior is byte-for-byte unchanged from before
+    v0.5.3.40. `.36` itself never performs the ceiling check and never
+    writes SUBMISSION_ATTEMPTED/OUTCOME (its own docstring says so
+    explicitly) because `.36` never calls `.35.submit()` -- THIS function
+    does, so THIS function is where those two responsibilities live for
+    the Alpaca path, mirroring `.31.authorized_submit()`'s identical
+    responsibilities on the MEXC path one layer down."""
     cfg = load_supervisor_config(supervisor_config)
     auth_claims_dir = auth_claims_dir or DEFAULT_ALPACA_AUTH_CLAIMS_DIR
     supervisor_claims_dir = supervisor_claims_dir or DEFAULT_ALPACA_CLIENT_ORDER_ID_CLAIMS_DIR
@@ -580,6 +656,19 @@ def supervise_alpaca_equity_execution(
     if canonical_spec.get("venue") != "ALPACA" or canonical_spec.get("asset_class") not in ("STOCK", "ETF"):
         return _blocked(canonical_spec, "ASSET_CLASS_VENUE", "NOT_AN_ALPACA_EQUITY_SPEC",
                          f"{canonical_spec.get('venue')}/{canonical_spec.get('asset_class')}")
+
+    # v0.5.3.40: the DECISION audit event is written only once the spec is
+    # confirmed to genuinely be an ALPACA/STOCK|ETF spec -- recording it
+    # any earlier (e.g. before the venue/asset-class gate above) would
+    # risk writing a DECISION event with a hardcoded venue="ALPACA" for a
+    # spec that was never actually routed as one.
+    revalidation40 = _load_revalidation_module() if audit_dir is not None else None
+    if revalidation40 is not None:
+        _record_decision_idempotent(
+            revalidation40, canonical_spec["client_order_id"],
+            venue="ALPACA", asset_class=canonical_spec["asset_class"], symbol=canonical_spec["symbol"],
+            spec_fingerprint=canonical_spec["spec_fingerprint"], base_dir=audit_dir,
+        )
 
     meta = _load_metadata_module()
     adapter35 = _load_alpaca_adapter_module()
@@ -609,7 +698,7 @@ def supervise_alpaca_equity_execution(
     auth36 = _load_alpaca_authorization_module()
     record = auth36.authorize(
         canonical_spec, alpaca_asset, environment=environment, config=auth_config,
-        claims_dir=auth_claims_dir, now=now_dt,
+        claims_dir=auth_claims_dir, now=now_dt, audit_dir=audit_dir,
     )
     if record.get("status") != "AUTHORIZED":
         return _blocked(canonical_spec, "AUTHORIZATION", record.get("reason"), record.get("detail"))
@@ -617,6 +706,8 @@ def supervise_alpaca_equity_execution(
     order_request = auth36.authorized_order_request(
         record, canonical_spec, alpaca_asset, auth_claims_dir, environment=environment,
         config=auth_config, now=now_dt,
+        price_fetch_fn=price_fetch_fn, max_quote_age_seconds=max_quote_age_seconds,
+        max_price_drift_bps=max_price_drift_bps, audit_dir=audit_dir,
     )
     if order_request["status"] == "AUTHORIZATION_ALREADY_CONSUMED":
         return _blocked(canonical_spec, "REPLAY_PROTECTION", order_request.get("reason"), order_request.get("detail"),
@@ -661,6 +752,36 @@ def supervise_alpaca_equity_execution(
                          "this module never constructs one itself",
                          authorization_id=record.get("authorization_id"), order_spec=order_request["order_spec"])
 
+    # v0.5.3.40 ceiling check -- fail-closed backstop for the residual
+    # claim-to-submit race, only meaningful when a price check actually
+    # happened above (order_request["price_check"] is only present when
+    # `price_fetch_fn` was supplied). BOTH claims already granted above
+    # (`.37`'s authorization_id claim inside .36, and this module's own
+    # local client_order_id claim just above) stay consumed regardless of
+    # this check's outcome -- never released, exactly mirroring `.31.
+    # authorized_submit()`'s identical MEXC-side backstop.
+    price_check = order_request.get("price_check")
+    if price_check is not None and revalidation40 is not None:
+        kwargs: dict[str, Any] = {}
+        if max_revalidation_to_submission_seconds is not None:
+            kwargs["max_seconds"] = max_revalidation_to_submission_seconds
+        try:
+            revalidation40.check_revalidation_to_submission_ceiling(
+                price_checked_at=price_check["price_checked_at"], now_dt=now_dt, **kwargs
+            )
+        except revalidation40.RevalidationRejected as exc:
+            return _blocked(canonical_spec, "SUBMISSION_CEILING", exc.reason, exc.detail,
+                             authorization_id=record.get("authorization_id"), order_spec=order_request["order_spec"])
+
+    # NO intervening logic between this point and the actual .35.submit()
+    # call below -- the ceiling check immediately above is itself part of
+    # what "tightening the claim-to-submit gap" means (a fail-closed
+    # check, not additional work that could itself go stale), not a
+    # violation of it.
+    if revalidation40 is not None:
+        _audit_write_best_effort(revalidation40, "record_submission_attempted",
+                                  canonical_spec["client_order_id"], base_dir=audit_dir)
+
     try:
         submission_result = adapter35.submit(order_request["order_spec"], alpaca_client)
     except Exception as exc:  # noqa: BLE001 -- see module docstring §2: `.35.submit()` has no
@@ -674,6 +795,13 @@ def supervise_alpaca_equity_execution(
             "live": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+    if revalidation40 is not None:
+        _audit_write_best_effort(
+            revalidation40, "record_outcome", canonical_spec["client_order_id"],
+            outcome=submission_result.get("status", "UNKNOWN"),
+            detail=submission_result.get("error"), base_dir=audit_dir,
+        )
 
     result["submission_result"] = submission_result
     result["status"] = submission_result["status"]
@@ -801,17 +929,27 @@ def supervise_mexc_futures_execution(
     attempt_submission: bool = False,
     supervisor_config: dict[str, Any] | None = None,
     now_dt: datetime | None = None,
+    price_fetch_fn: Any = None,
+    max_quote_age_seconds: float | None = None,
+    max_price_drift_bps: float | None = None,
+    max_revalidation_to_submission_seconds: float | None = None,
+    audit_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The single entry point for a NEW MEXC CRYPTO_FUTURES execution
     decision. Sequence: canonical spec self-consistency -> venue/asset-
-    class gate -> `.34` instrument-metadata resolution -> Supervisor kill
-    switch -> crash-recovery check via `.29.get_intent()` -> (new decision
+    class gate -> (opt-in v0.5.3.40) unified audit-trail DECISION event ->
+    `.34` instrument-metadata resolution -> Supervisor kill switch ->
+    crash-recovery check via `.29.get_intent()` -> (new decision
     only) `.29.create_intent()` -> `.33.to_mexc_execution_spec()` ->
     `.31.authorize()` -> IF `attempt_submission` (else stop here, nothing
     claimed anywhere -- see the inline comment above this function's
-    `.31.authorized_submit()` call) -> `.31.authorized_submit()` (claims via
-    `.32`, revalidates, adapter-validates, calls `.27.submit()`) -> outcome
-    mapped onto `.29`'s ledger per module docstring §3.
+    `.31.authorized_submit()` call) -> `.31.authorized_submit()` (revalidates
+    -- including, when `price_fetch_fn` is supplied, a live v0.5.3.40 price
+    check and its own ceiling-check backstop -- claims via `.32`,
+    adapter-validates, calls `.27.submit()`, and writes its OWN
+    SUBMISSION_ATTEMPTED/OUTCOME audit events since `.31`, unlike `.36`, is
+    the thing that actually calls the venue adapter's submit function) ->
+    outcome mapped onto `.29`'s ledger per module docstring §3.
 
     `exchange` must already be constructed by the caller (real in a
     hypothetical production deployment, a fake test double in every test
@@ -822,7 +960,18 @@ def supervise_mexc_futures_execution(
     exchange) is called ONLY when `attempt_submission=True` -- never as a
     "dry run" with a stand-in exchange, because that would durably consume
     both replay-protection claims for a submission that never really
-    happened."""
+    happened.
+
+    price_fetch_fn/max_quote_age_seconds/max_price_drift_bps/
+    max_revalidation_to_submission_seconds/audit_dir are ALL additive and
+    opt-in (v0.5.3.40), passed straight through to `.31.authorize()`/
+    `.31.authorized_submit()`, which already implement the entire
+    revalidate -> claim -> submit reordering and ceiling-check backstop
+    themselves (unlike the Alpaca path, where this module owns those
+    responsibilities because `.36` never submits -- see
+    `supervise_alpaca_equity_execution()`'s docstring). Every one defaults
+    to None, and when every one is None this function's behavior is
+    byte-for-byte unchanged from before v0.5.3.40."""
     cfg = load_supervisor_config(supervisor_config)
     auth_claims_dir = auth_claims_dir or DEFAULT_MEXC_AUTH_CLAIMS_DIR
     adapter_claims_dir = adapter_claims_dir or DEFAULT_MEXC_ADAPTER_CLAIMS_DIR
@@ -839,6 +988,14 @@ def supervise_mexc_futures_execution(
     if canonical_spec.get("venue") != "MEXC" or canonical_spec.get("asset_class") != "CRYPTO_FUTURES":
         return _blocked(canonical_spec, "ASSET_CLASS_VENUE", "NOT_A_MEXC_FUTURES_SPEC",
                          f"{canonical_spec.get('venue')}/{canonical_spec.get('asset_class')}")
+
+    revalidation40 = _load_revalidation_module() if audit_dir is not None else None
+    if revalidation40 is not None:
+        _record_decision_idempotent(
+            revalidation40, canonical_spec["client_order_id"],
+            venue="MEXC", asset_class=canonical_spec["asset_class"], symbol=canonical_spec["symbol"],
+            spec_fingerprint=canonical_spec["spec_fingerprint"], base_dir=audit_dir,
+        )
 
     meta = _load_metadata_module()
     try:
@@ -905,7 +1062,7 @@ def supervise_mexc_futures_execution(
 
     auth31 = _load_mexc_authorization_module()
     record = auth31.authorize(wire_spec, config=auth_config, ledger_base_dir=ledger_base_dir,
-                               claims_dir=auth_claims_dir, now=now_dt)
+                               claims_dir=auth_claims_dir, now=now_dt, audit_dir=audit_dir)
     if record.get("status") != "AUTHORIZED":
         # Nothing claimed yet -- the intent stays at NEW, safe to retry later.
         return _blocked(canonical_spec, "AUTHORIZATION", record.get("reason"), record.get("detail"),
@@ -950,6 +1107,10 @@ def supervise_mexc_futures_execution(
     submission = auth31.authorized_submit(
         record, wire_spec, auth_claims_dir, adapter_claims_dir, config=auth_config,
         ledger_base_dir=ledger_base_dir, exchange=exchange, now=now_dt,
+        price_fetch_fn=price_fetch_fn, max_quote_age_seconds=max_quote_age_seconds,
+        max_price_drift_bps=max_price_drift_bps,
+        max_revalidation_to_submission_seconds=max_revalidation_to_submission_seconds,
+        audit_dir=audit_dir,
     )
 
     result = _base_result(canonical_spec)
@@ -962,6 +1123,31 @@ def supervise_mexc_futures_execution(
         result["stage"] = "REPLAY_PROTECTION"
         result["reason"] = submission.get("reason")
         result["existing_intent_id"] = submission.get("existing_intent_id")
+        result["intent_record"] = intent
+        return result
+
+    # v0.5.3.40 FIX (found during this module's own re-verification, not
+    # present in the original .38 milestone): since .31's v0.5.3.40
+    # revalidate -> claim -> submit reordering, a "REVALIDATION_FAILED"
+    # status is ambiguous on its own -- it now covers BOTH a pre-claim
+    # rejection (nothing was ever claimed) AND a post-claim ceiling-check
+    # rejection (a claim WAS granted moments earlier). The OLD code here
+    # unconditionally assumed "anything other than
+    # AUTHORIZATION_ALREADY_CONSUMED means the claim was granted" --
+    # true under the pre-v0.5.3.40 claim -> revalidate -> submit order,
+    # but no longer true. `.31.authorized_submit()` now returns an
+    # explicit `claim_granted` boolean (added alongside this fix) that
+    # this module consults directly instead of inferring it from
+    # `status`, so a pre-claim REVALIDATION_FAILED correctly leaves the
+    # `.29` intent untouched (still NEW, still retryable) instead of
+    # incorrectly recording a claim -> escalating an intent that was
+    # never actually claimed. See `.31.authorized_submit()`'s own
+    # docstring for the full explanation of why this field exists.
+    if not submission.get("claim_granted"):
+        result["status"] = "BLOCKED"
+        result["stage"] = "REVALIDATION"
+        result["reason"] = submission.get("reason")
+        result["detail"] = submission.get("detail")
         result["intent_record"] = intent
         return result
 

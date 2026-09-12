@@ -330,6 +330,47 @@ def _load_adapter_module():
         return mod
 
 
+def _load_revalidation_module():
+    """Dynamic import of v0.5.3.40 (Pre-Submission Revalidation +
+    Unified Execution Audit Trail), same pattern as every other
+    cross-module reference in this file. Used by
+    revalidate_before_submission() for the opt-in live-price check and
+    by authorize()/authorized_order_request() for the opt-in audit-trail
+    writes."""
+    try:
+        import aura_v05340_pre_submission_revalidation as mod
+        return mod
+    except ImportError:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "aura_v05340_pre_submission_revalidation",
+            ROOT / "aura_v05340_pre_submission_revalidation.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+
+def _audit_write_best_effort(revalidation40: Any, fn_name: str, *args: Any, **kwargs: Any) -> None:
+    """v0.5.3.40 audit-trail writes are best-effort, never safety-
+    relevant -- identical rationale and identical fix to .31's own
+    _audit_write_best_effort() (see that function's docstring for the
+    full explanation). Found during this milestone's own end-to-end
+    testing that a genuine retry of a decision whose audit trail already
+    reached a terminal state, or two callers racing on the SAME
+    client_order_id, would otherwise raise an unhandled
+    IllegalTransitionError out of authorize()/authorized_order_request()
+    -- resolved per Martin's explicit .40 completion-report decision
+    ("best-effort audit writes"). Swallows ONLY IllegalTransitionError,
+    never AuditTrailError (corruption/tamper detection and an
+    already-exists conflict on record_decision() both still propagate)."""
+    fn = getattr(revalidation40, fn_name)
+    try:
+        fn(*args, **kwargs)
+    except revalidation40.IllegalTransitionError:
+        pass
+
+
 def _load_replay_module():
     """Dynamic import of v0.5.3.37 -- same _load_*_module() pattern as
     every other cross-module reference in this file. Function-scoped and
@@ -591,7 +632,8 @@ def _reject(reason: str, detail: Any = None) -> dict[str, Any]:
 
 def authorize(execution_spec: dict[str, Any], alpaca_asset: dict[str, Any], environment: str = "PAPER",
               safety_state: dict[str, Any] | None = None, config: dict[str, Any] | None = None,
-              claims_dir: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
+              claims_dir: Path | None = None, now: datetime | None = None,
+              audit_dir: Path | None = None) -> dict[str, Any]:
     """Evaluate execution_spec (the .33 canonical spec) + alpaca_asset
     (real, or faithfully mocked in tests, Alpaca asset metadata) against a
     freshly, independently assembled SafetyState and, if every guardrail
@@ -687,6 +729,19 @@ def authorize(execution_spec: dict[str, Any], alpaca_asset: dict[str, Any], envi
         "guardrails_evaluated": guardrail_result["evaluated"],
     }
     record["authorization_hash"] = _fingerprint(record)
+    if audit_dir is not None:
+        # Opt-in, v0.5.3.40 -- see .31.authorize()'s identical note: only
+        # a genuine AUTHORIZED outcome is ever recorded, and the DECISION
+        # event for this client_order_id must already exist (v0.5.3.38
+        # writes it at orchestration start; a genuinely missing DECISION
+        # record still raises). A retry/race appending AUTHORIZED to an
+        # already-past-that-point record is swallowed by
+        # _audit_write_best_effort (best-effort audit writes, Martin's
+        # explicit .40 decision) -- see that function's docstring.
+        client_order_id = execution_spec.get("client_order_id")
+        if client_order_id:
+            _audit_write_best_effort(_load_revalidation_module(), "record_authorized",
+                                      client_order_id, base_dir=audit_dir)
     return record
 
 
@@ -711,7 +766,9 @@ def claim_authorization(claims_dir: Path, authorization_id: str) -> bool:
 def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[str, Any],
                                   alpaca_asset: dict[str, Any], environment: str = "PAPER",
                                   config: dict[str, Any] | None = None, claims_dir: Path | None = None,
-                                  now: datetime | None = None) -> dict[str, Any]:
+                                  now: datetime | None = None, price_fetch_fn: Any = None,
+                                  max_quote_age_seconds: float | None = None,
+                                  max_price_drift_bps: float | None = None) -> dict[str, Any]:
     """Final freshness/identity/safety re-check, immediately before handing
     off to .35's order-construction functions. Reuses _evaluate_guardrails()
     -- the SAME policy authorize() used -- against a FRESH
@@ -771,7 +828,33 @@ def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[st
         return _reject("POSITION_INTENT_MISMATCH",
                         f"{guardrail_result['position_intent']!r} != {record.get('position_intent')!r}")
 
-    return {
+    # v0.5.3.40 EXTENSION (additive, opt-in, mirrors .31's identical
+    # extension): when price_fetch_fn is supplied, also perform a
+    # genuine live-price revalidation against execution_spec's
+    # reference_price -- the last check before REVALIDATED. None (the
+    # default) leaves behavior byte-for-byte unchanged from before
+    # v0.5.3.40.
+    price_check: dict[str, Any] | None = None
+    if price_fetch_fn is not None:
+        revalidation40 = _load_revalidation_module()
+        kwargs: dict[str, Any] = {}
+        if max_quote_age_seconds is not None:
+            kwargs["max_quote_age_seconds"] = max_quote_age_seconds
+        if max_price_drift_bps is not None:
+            kwargs["max_price_drift_bps"] = max_price_drift_bps
+        try:
+            price_check = revalidation40.revalidate_market_state(
+                reference_price=execution_spec.get("reference_price"),
+                price_fetch_fn=price_fetch_fn,
+                now_dt=moment,
+                **kwargs,
+            )
+        except revalidation40.RevalidationRejected as exc:
+            rejected = _reject(exc.reason, exc.detail)
+            rejected["price_check_failed"] = True
+            return rejected
+
+    result = {
         "status": "REVALIDATED",
         "authorization_id": record.get("authorization_id"),
         "revalidated_at": _iso(moment),
@@ -779,38 +862,71 @@ def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[st
         "reason": None,
         "detail": None,
     }
+    if price_check is not None:
+        result["price_check"] = price_check
+    return result
 
 
 def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, Any], alpaca_asset: dict[str, Any],
                               claims_dir: Path, environment: str = "PAPER", config: dict[str, Any] | None = None,
-                              now: datetime | None = None) -> dict[str, Any]:
+                              now: datetime | None = None, price_fetch_fn: Any = None,
+                              max_quote_age_seconds: float | None = None,
+                              max_price_drift_bps: float | None = None,
+                              audit_dir: Path | None = None) -> dict[str, Any]:
     """The documented, tested integration point between .36 authorization
     and .35 adapter validation/construction (module docstring's opening
-    diagram). Sequence:
+    diagram).
 
-      1. Claim authorization_id via .37's durable, ledger-linked
+    v0.5.3.40 REORDERING (approved design, mirrors .31's identical
+    change): revalidate BEFORE claim now (previously claim -> revalidate
+    -> construct), so a spec that is already stale -- including, new in
+    v0.5.3.40, already drifted in price when price_fetch_fn is supplied
+    -- never burns a .37 claim slot at all. The claim step itself is
+    unchanged: still atomic, still single-winner, still never released.
+
+    Sequence:
+      1. revalidate_before_submission() -- a fresh freshness/identity/
+         safety re-check, the SAME policy authorize() used, now also
+         including the opt-in v0.5.3.40 live-price check. If this fails,
+         NOTHING has been claimed -- the authorization is simply
+         rejected, and (unlike before v0.5.3.40) no claim is burned on a
+         spec that never should have been consumed in the first place.
+      2. Claim authorization_id via .37's durable, ledger-linked
          consumption record (_load_replay_module().claim() -- see module
          docstring item 4, updated in the .37 milestone). If already
          claimed (or the record itself is invalid/tampered/reused with
          mismatched content), return AUTHORIZATION_ALREADY_CONSUMED --
-         .35's order-construction functions are NEVER called in this case.
-         claim_authorization() (this module's own provisional marker-file
-         primitive) is NOT called here anymore; it remains defined below,
-         unmodified, as a general-purpose primitive only.
-      2. revalidate_before_submission() -- a fresh freshness/identity/
-         safety re-check, the SAME policy authorize() used. If this fails,
-         the authorization_id claim from step 1 remains PERMANENTLY
-         consumed -- never released or retried, exactly mirroring .31's
-         own authorized_submit() discipline (and .37's own module
-         docstring item 2: EXECUTION_UNCERTAIN never becomes permission to
-         retry).
+         .35's order-construction functions are NEVER called in this
+         case: this is the fail-closed race outcome when a concurrent
+         process already won the claim after both independently passed
+         revalidation (design doc Section 5) -- a clean loss, not a
+         corruption. If a claim IS won after this point, it remains
+         PERMANENTLY consumed regardless of anything that happens
+         later -- never released or retried, exactly mirroring .31's own
+         authorized_submit() discipline (and .37's own module docstring
+         item 2: EXECUTION_UNCERTAIN never becomes permission to retry).
+         claim_authorization() (this module's own provisional
+         marker-file primitive) is NOT called here anymore; it remains
+         defined below, unmodified, as a general-purpose primitive only.
       3. .35.build_order_request_spec() + .35.to_alpaca_order_request()
          (both unmodified, both pure/non-submitting) produce the real
          Alpaca SDK request object. This function stops here -- it NEVER
          calls .35.submit() (module docstring item 5). Actual submission
-         orchestration is out of scope for .36."""
+         orchestration, including the v0.5.3.40 ceiling check
+         (check_revalidation_to_submission_ceiling(), since a price
+         check may have happened above and .35.submit() is called
+         separately, by .38), is out of scope for .36.
+
+    audit_dir (opt-in, v0.5.3.40): when supplied, REVALIDATED/CONSUMED
+    events are written to the unified audit trail for this
+    client_order_id (which must already have a DECISION event recorded
+    by .38). SUBMISSION_ATTEMPTED/OUTCOME are NOT written here -- .38
+    writes those, since it is .38, not .36, that actually calls
+    .35.submit()."""
     moment = _now(now)
     authorization_id = record.get("authorization_id")
+    client_order_id = execution_spec.get("client_order_id") if isinstance(execution_spec, dict) else None
+    revalidation40 = _load_revalidation_module() if audit_dir is not None else None
 
     if record.get("status") != "AUTHORIZED" or not isinstance(authorization_id, str) or not authorization_id:
         return {
@@ -822,8 +938,41 @@ def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, A
             "alpaca_order_request": None,
         }
 
+    revalidation = revalidate_before_submission(
+        record, execution_spec, alpaca_asset, environment=environment, config=config,
+        claims_dir=claims_dir, now=moment,
+        price_fetch_fn=price_fetch_fn, max_quote_age_seconds=max_quote_age_seconds,
+        max_price_drift_bps=max_price_drift_bps,
+    )
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(
+            revalidation40, "record_revalidated", client_order_id,
+            passed=revalidation["status"] == "REVALIDATED",
+            reason=revalidation.get("reason"),
+            detail=revalidation.get("detail"),
+            price_result=revalidation.get("price_check"),
+            base_dir=audit_dir,
+        )
+    if revalidation["status"] != "REVALIDATED":
+        # Nothing claimed yet -- no CONSUMED event, consumption was
+        # never attempted.
+        return {
+            "status": "REVALIDATION_FAILED",
+            "authorization_id": authorization_id,
+            "reason": revalidation.get("reason"),
+            "detail": revalidation.get("detail"),
+            "order_spec": None,
+            "alpaca_order_request": None,
+        }
+
     replay37 = _load_replay_module()
     claim_result = replay37.claim(record, claims_dir=claims_dir)
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(
+            revalidation40, "record_consumed", client_order_id,
+            granted=bool(claim_result["granted"]),
+            reason=claim_result.get("reason"), base_dir=audit_dir,
+        )
     if not claim_result["granted"]:
         claim_reason = claim_result.get("reason")
 
@@ -869,25 +1018,22 @@ def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, A
             "alpaca_order_request": None,
         }
 
-    revalidation = revalidate_before_submission(
-        record, execution_spec, alpaca_asset, environment=environment, config=config,
-        claims_dir=claims_dir, now=moment,
-    )
-    if revalidation["status"] != "REVALIDATED":
-        return {
-            "status": "REVALIDATION_FAILED",
-            "authorization_id": authorization_id,
-            "reason": revalidation.get("reason"),
-            "detail": revalidation.get("detail"),
-            "order_spec": None,
-            "alpaca_order_request": None,
-        }
-
+    # v0.5.3.40: no second revalidate_before_submission() call here --
+    # revalidation already happened once, above, BEFORE the claim was
+    # taken (mirrors .31's authorized_submit() exactly; see that
+    # function for the identical pattern). A stray leftover second call
+    # from the pre-reordering code path (claim -> revalidate ->
+    # construct) was removed here: once the claim above is granted it is
+    # permanently consumed regardless of anything that happens next, so
+    # re-running the freshness/identity policy at this point would be
+    # both redundant and misleading -- a failure here could never
+    # un-consume the claim, so it must not be reported as though it
+    # could.
     adapter35 = _load_adapter_module()
     order_spec = adapter35.build_order_request_spec(execution_spec, alpaca_asset)
     alpaca_order_request = adapter35.to_alpaca_order_request(order_spec)
 
-    return {
+    result = {
         "status": "AUTHORIZED_ORDER_REQUEST_READY",
         "authorization_id": authorization_id,
         "reason": None,
@@ -895,3 +1041,12 @@ def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, A
         "order_spec": order_spec,
         "alpaca_order_request": alpaca_order_request,
     }
+    # v0.5.3.40: thread the price_check (if any) from the pre-claim
+    # revalidation through to the caller (.38), which owns the actual
+    # .35.submit() call and therefore owns the ceiling check -- .36
+    # itself never submits, so it cannot enforce a revalidation-to-
+    # submission ceiling on its own (see module docstring).
+    price_check = revalidation.get("price_check")
+    if price_check is not None:
+        result["price_check"] = price_check
+    return result

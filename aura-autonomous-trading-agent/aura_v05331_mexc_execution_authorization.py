@@ -182,6 +182,59 @@ def _load_adapter_module():
         return mod
 
 
+def _load_revalidation_module():
+    """Dynamic import of v0.5.3.40 (Pre-Submission Revalidation +
+    Unified Execution Audit Trail), same pattern as the other
+    _load_*_module() helpers above. Used by revalidate_before_submission()
+    for the live-price check (opt-in, see that function's docstring) and
+    by authorized_submit() for the audit-trail writes (also opt-in, via
+    audit_dir)."""
+    try:
+        import aura_v05340_pre_submission_revalidation as revalidation40  # type: ignore
+        return revalidation40
+    except ImportError:
+        import importlib.util
+        module_path = Path(__file__).resolve().parent / "aura_v05340_pre_submission_revalidation.py"
+        spec = importlib.util.spec_from_file_location(
+            "aura_v05340_pre_submission_revalidation", module_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+
+def _audit_write_best_effort(revalidation40: Any, fn_name: str, *args: Any, **kwargs: Any) -> None:
+    """v0.5.3.40 audit-trail writes are best-effort, never safety-
+    relevant -- found and resolved this way per Martin's explicit
+    decision on the .40 completion report ("best-effort audit writes"),
+    after discovering during this milestone's own end-to-end testing that
+    a genuine retry of a decision whose audit trail already reached a
+    terminal state (e.g. a prior REVALIDATION_FAILED), or two callers
+    racing to append the SAME event to the SAME client_order_id's record
+    (only one of which can ever be the real claim winner at the .32/.37
+    layer -- the audit trail itself has no concept of arbitrating that),
+    would otherwise raise an unhandled IllegalTransitionError straight
+    out of authorize()/authorized_submit() -- an audit-trail bookkeeping
+    conflict was crashing a real authorization/claim/submission decision
+    that was itself entirely correct. This wrapper swallows ONLY
+    IllegalTransitionError (an event that is structurally well-formed but
+    illegal to append given the record's CURRENT state -- exactly the
+    expected-under-concurrency-or-retry case) -- never AuditTrailError
+    (which also covers a genuinely corrupted/tampered record failing its
+    own hash self-verification, or an already-exists conflict on
+    record_decision() -- neither of those is a benign race, and neither
+    is swallowed here). The claim/replay-protection layers (.32/.37) and
+    the .29 ledger remain the sole source of truth for what was actually
+    claimed/submitted either way -- this only ever affects whether the
+    SEPARATE .40 audit trail captures every single attempt, never
+    execution safety itself."""
+    fn = getattr(revalidation40, fn_name)
+    try:
+        fn(*args, **kwargs)
+    except revalidation40.IllegalTransitionError:
+        pass
+
+
 def _load_replay_module():
     """Dynamic import of v0.5.3.32 (MEXC Replay-Protected Consumption),
     same pattern as _load_ledger_module()/_load_adapter_module(). Used by
@@ -479,7 +532,8 @@ def _reject(reason: str, detail: Any = None) -> dict[str, Any]:
 
 def authorize(execution_spec: dict[str, Any], safety_state: dict[str, Any] | None = None,
               config: dict[str, Any] | None = None, ledger_base_dir: Any = None,
-              claims_dir: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
+              claims_dir: Path | None = None, now: datetime | None = None,
+              audit_dir: Path | None = None) -> dict[str, Any]:
     """Evaluate execution_spec against a freshly, independently assembled
     SafetyState and, if every guardrail passes, issue a fingerprint-bound,
     TTL-bound AuthorizationRecord.
@@ -557,6 +611,24 @@ def authorize(execution_spec: dict[str, Any], safety_state: dict[str, Any] | Non
         "guardrails_evaluated": guardrail_result["evaluated"],
     }
     record["authorization_hash"] = _fingerprint(record)
+    if audit_dir is not None:
+        # Opt-in, v0.5.3.40: only a genuine AUTHORIZED outcome is ever
+        # recorded (design doc Section 2.2) -- a rejected authorization
+        # is never written as an event, because it was never real. The
+        # DECISION event for this client_order_id must already exist
+        # (v0.5.3.38 writes it at orchestration start); a genuinely
+        # missing DECISION record still raises (AUDIT_RECORD_NOT_FOUND,
+        # an AuditTrailError -- a real caller-usage defect, never
+        # swallowed). What IS swallowed, via _audit_write_best_effort
+        # (best-effort audit writes, Martin's explicit .40 decision): a
+        # retry or a concurrent race appending AUTHORIZED to a
+        # client_order_id whose audit record already moved past that
+        # point -- an audit-trail bookkeeping conflict, not a reason to
+        # fail a real authorization that already succeeded.
+        client_order_id = execution_spec.get("client_order_id")
+        if client_order_id:
+            _audit_write_best_effort(_load_revalidation_module(), "record_authorized",
+                                      client_order_id, base_dir=audit_dir)
     return record
 
 
@@ -590,7 +662,9 @@ def claim_authorization(claims_dir: Path, authorization_id: str) -> bool:
 
 def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[str, Any],
                                   config: dict[str, Any] | None = None, ledger_base_dir: Any = None,
-                                  claims_dir: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
+                                  claims_dir: Path | None = None, now: datetime | None = None,
+                                  price_fetch_fn: Any = None, max_quote_age_seconds: float | None = None,
+                                  max_price_drift_bps: float | None = None) -> dict[str, Any]:
     """Final freshness/identity/safety re-check, immediately before
     handing execution_spec to v0.5.3.27.submit(). Reuses
     _evaluate_guardrails() -- the SAME policy authorize() used (Martin
@@ -598,7 +672,19 @@ def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[st
     cached or passed-in one. Also re-checks that execution_spec still
     fingerprints to what was recorded on `record` at authorize()-time, so
     a spec modified after authorization is caught here even if it would
-    otherwise still pass the guardrails on its own new merits."""
+    otherwise still pass the guardrails on its own new merits.
+
+    v0.5.3.40 EXTENSION (additive, opt-in): when price_fetch_fn is
+    supplied, this function ALSO performs a genuine live-price
+    revalidation (v0.5.3.40.revalidate_market_state()) against
+    execution_spec's reference_price, as the last check before returning
+    REVALIDATED -- Martin's approved Option B. When price_fetch_fn is
+    None (the default, and every caller before v0.5.3.40 existed),
+    behavior is byte-for-byte unchanged from before v0.5.3.40. A price
+    rejection is reported through the exact same _reject() shape as
+    every other rejection reason in this function, with
+    price_check_failed=True added so a caller can distinguish it if it
+    needs to."""
     cfg = load_config(config)
     moment = _now(now)
 
@@ -626,25 +712,74 @@ def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[st
     if guardrail_result["blocked"]:
         return _reject(guardrail_result["reason"], guardrail_result.get("detail"))
 
-    return {
+    price_check: dict[str, Any] | None = None
+    if price_fetch_fn is not None:
+        revalidation40 = _load_revalidation_module()
+        kwargs: dict[str, Any] = {}
+        if max_quote_age_seconds is not None:
+            kwargs["max_quote_age_seconds"] = max_quote_age_seconds
+        if max_price_drift_bps is not None:
+            kwargs["max_price_drift_bps"] = max_price_drift_bps
+        try:
+            price_check = revalidation40.revalidate_market_state(
+                reference_price=execution_spec.get("reference_price"),
+                price_fetch_fn=price_fetch_fn,
+                now_dt=moment,
+                **kwargs,
+            )
+        except revalidation40.RevalidationRejected as exc:
+            rejected = _reject(exc.reason, exc.detail)
+            rejected["price_check_failed"] = True
+            return rejected
+
+    result = {
         "status": "REVALIDATED",
         "authorization_id": record.get("authorization_id"),
         "revalidated_at": _iso(moment),
         "reason": None,
         "detail": None,
     }
+    if price_check is not None:
+        result["price_check"] = price_check
+    return result
 
 
 def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
                        authorization_claims_dir: Path, adapter_claims_dir: Path,
                        config: dict[str, Any] | None = None, ledger_base_dir: Any = None,
-                       exchange: Any = None, now: datetime | None = None) -> dict[str, Any]:
+                       exchange: Any = None, now: datetime | None = None,
+                       price_fetch_fn: Any = None, max_quote_age_seconds: float | None = None,
+                       max_price_drift_bps: float | None = None,
+                       max_revalidation_to_submission_seconds: float | None = None,
+                       audit_dir: Path | None = None) -> dict[str, Any]:
     """The documented, tested interaction between this module's
     authorization_id claim and v0.5.3.27's own client_order_id claim
     (Martin constraint 2).
 
+    v0.5.3.40 REORDERING (approved design, "revalidate -> claim ->
+    submit where architecturally possible"): the sequence below claims
+    AFTER revalidation now, reversed from the pre-v0.5.3.40 order
+    (claim -> revalidate -> submit), specifically so a spec that is
+    already stale (expired, guardrail-failed, or -- new in v0.5.3.40 --
+    already drifted in price) never burns an authorization_id claim
+    slot at all. The claim itself is UNCHANGED: still atomic
+    (O_CREAT|O_EXCL via v0.5.3.32), still single-winner, still NEVER
+    released under any outcome once granted -- this reordering changes
+    only what happens *before* a claim is attempted, never what the
+    claim itself guarantees.
+
     Sequence:
-      1. Claim authorization_id via v0.5.3.32 (MEXC Replay-Protected
+      1. revalidate_before_submission() -- a fresh freshness/identity/
+         safety re-check, the SAME policy authorize() used, NOW ALSO
+         including the v0.5.3.40 live-price check when price_fetch_fn is
+         supplied (opt-in; see that function's docstring). If this
+         fails, NOTHING has been claimed anywhere -- the authorization
+         is simply rejected, exactly like an authorize()-time rejection
+         (the v0.5.3.29 MEXC intent, if one already exists for this
+         client_order_id, stays at its existing NEW/open state --
+         confirmed safe by the v0.5.3.40 pre-implementation
+         investigation; no v0.5.3.29 change was needed).
+      2. Claim authorization_id via v0.5.3.32 (MEXC Replay-Protected
          Consumption), against `authorization_claims_dir` -- always
          separate from v0.5.3.27's own DEFAULT_CLAIMS_DIR /
          `adapter_claims_dir`. This is the durable, ledger-linked claim
@@ -655,7 +790,12 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
          claimed, return AUTHORIZATION_ALREADY_CONSUMED with
          `existing_intent_id` set to the prior claim's client_order_id
          (resolvable against v0.5.3.29.get_intent()) -- v0.5.3.27.submit()
-         is NEVER called in this case. If the claim store itself is
+         is NEVER called in this case: this is the fail-closed race
+         outcome when a concurrent process already won the claim after
+         both processes independently passed revalidation (design doc
+         Section 5) -- a clean loss, not a corruption, and the losing
+         process's own revalidation result is simply discarded (it was a
+         pure read with no side effects). If the claim store itself is
          unreachable, return AUTHORIZATION_ALREADY_CONSUMED with reason
          CLAIM_STORE_UNREACHABLE -- fails closed identically, v0.5.3.27.
          submit() is NEVER called either way.
@@ -667,22 +807,23 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
          mechanism this function relies on for the authorization_id claim
          decision, now that v0.5.3.32 provides a durable, ledger-linked
          equivalent per the specification.
-      2. revalidate_before_submission() -- a fresh freshness/identity/
-         safety re-check, the SAME policy authorize() used. If this fails
-         (e.g. the kill switch was engaged after authorize() but before
-         this call, or the spec was mutated), the authorization_id claim
-         made in step 1 remains PERMANENTLY consumed. It is never released
-         or retried: a claim that led to a blocked revalidation must not
-         be replayable, or a second caller could race a second attempt
-         with the same authorization_id.
-      3. v0.5.3.27.validate_spec() (unmodified -- its own kill_switch /
+      3. IF the claim was won: a v0.5.3.40 ceiling check
+         (check_revalidation_to_submission_ceiling(), opt-in, only run
+         when a price check happened in step 1) immediately before the
+         actual submission call -- the fail-closed backstop for the
+         residual gap between "price observed" and "order actually
+         submitted" (design doc Section 5). If this fires, the claim
+         from step 2 remains PERMANENTLY consumed -- the no-release
+         invariant is never violated by this check; it only blocks the
+         submit call itself from proceeding.
+      4. v0.5.3.27.validate_spec() (unmodified -- its own kill_switch /
          execution_authorized / live_execution_authorized / symbol / etc.
          checks on execution_spec still apply in full as a legacy,
          defense-in-depth gate) followed by v0.5.3.27.submit() (unmodified),
          which makes its OWN, separate, atomic client_order_id claim.
            - If v0.5.3.27's client_order_id claim fails
              (DUPLICATE_CLAIM_REJECTED), no order is submitted. The
-             authorization_id claim from step 1 remains permanently
+             authorization_id claim from step 2 remains permanently
              consumed -- it is NOT released or retried. This state
              (authorization succeeded, but v0.5.3.27's own independent
              replay guard refused the same client_order_id) is returned
@@ -698,15 +839,47 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
              authorization_id), which will itself be blocked by
              v0.5.3.27's OWN claim if client_order_id is reused, exactly
              as intended.
+
+    audit_dir (opt-in, v0.5.3.40): when supplied, REVALIDATED/CONSUMED/
+    SUBMISSION_ATTEMPTED/OUTCOME events are written to the unified audit
+    trail for this client_order_id (which must already have a DECISION
+    event recorded -- v0.5.3.38 does this at orchestration start). When
+    None (the default), no audit-trail writes happen at all -- behavior
+    is byte-for-byte unchanged from before v0.5.3.40.
+
+    claim_granted (added v0.5.3.38 wiring, NOT part of the original
+    v0.5.3.40 design doc): every returned dict now also carries a plain
+    boolean saying whether v0.5.3.32's authorization_id claim was
+    actually granted during THIS call. This is necessary, not
+    cosmetic: since the v0.5.3.40 reordering, a "REVALIDATION_FAILED"
+    status is ambiguous on its own -- it now covers BOTH a pre-claim
+    rejection (structural guard or revalidate_before_submission()
+    failure, step 1 -- nothing claimed) AND a post-claim ceiling-check
+    rejection (step 3 -- the claim WAS granted moments earlier and
+    stays permanently consumed). A caller (v0.5.3.38) that maps this
+    function's outcome onto v0.5.3.29's ledger MUST know which case it
+    is: calling v0.5.3.29.record_claimed() for a REVALIDATION_FAILED
+    outcome that never actually claimed anything would incorrectly
+    transition a v0.5.3.29 intent to CLAIMED (and then immediately
+    escalate it) for a decision that is genuinely still safe to retry
+    -- directly violating Martin's own explicit v0.5.3.40 instruction
+    ("do not permanently consume an authorization merely because an
+    already-stale authorization reached the revalidation stage"). This
+    field is what lets v0.5.3.38 avoid that. claim_granted is False on
+    every return path above this point in the function and True on
+    every return path below the v0.5.3.32 claim() call that actually
+    won (AUTHORIZATION_ALREADY_CONSUMED is also False -- THIS call's own
+    claim attempt did not succeed, even though some other call's did).
     """
     cfg = load_config(config)
     moment = _now(now)
     authorization_id = record.get("authorization_id")
     client_order_id = execution_spec.get("client_order_id") if isinstance(execution_spec, dict) else None
+    revalidation40 = _load_revalidation_module() if audit_dir is not None else None
 
     # Structural guard: a rejection dict (from authorize()) or any other
-    # malformed record must never even reach the replay-protection claim
-    # step -- there is nothing valid to claim on behalf of. This is
+    # malformed record must never even reach the revalidation/claim
+    # steps -- there is nothing valid to claim on behalf of. This is
     # checked here, not just relied upon at the caller, because
     # authorized_submit() is itself part of the fail-closed boundary.
     if record.get("status") != "AUTHORIZED" or not isinstance(authorization_id, str) or not authorization_id:
@@ -717,6 +890,37 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
             "detail": f"record status is {record.get('status')!r}",
             "existing_intent_id": None,
             "submission_result": None,
+            "claim_granted": False,
+        }
+
+    revalidation = revalidate_before_submission(
+        record, execution_spec, config=cfg, ledger_base_dir=ledger_base_dir,
+        claims_dir=authorization_claims_dir, now=moment,
+        price_fetch_fn=price_fetch_fn, max_quote_age_seconds=max_quote_age_seconds,
+        max_price_drift_bps=max_price_drift_bps,
+    )
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(
+            revalidation40, "record_revalidated", client_order_id,
+            passed=revalidation["status"] == "REVALIDATED",
+            reason=revalidation.get("reason"),
+            detail=revalidation.get("detail"),
+            price_result=revalidation.get("price_check"),
+            base_dir=audit_dir,
+        )
+    if revalidation["status"] != "REVALIDATED":
+        # Nothing claimed yet -- exactly like an authorize()-time
+        # rejection, the v0.5.3.29 intent (if any) stays at its existing
+        # open state, safe to retry on a future cycle. No CONSUMED event
+        # is written -- consumption was never attempted.
+        return {
+            "status": "REVALIDATION_FAILED",
+            "authorization_id": authorization_id,
+            "reason": revalidation.get("reason"),
+            "detail": revalidation.get("detail"),
+            "existing_intent_id": None,
+            "submission_result": None,
+            "claim_granted": False,
         }
 
     replay32 = _load_replay_module()
@@ -726,6 +930,12 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
         safety_state_fingerprint=record.get("safety_state_fingerprint"),
         claims_dir=authorization_claims_dir,
     )
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(
+            revalidation40, "record_consumed", client_order_id,
+            granted=bool(claim_result["granted"]),
+            reason=claim_result.get("reason"), base_dir=audit_dir,
+        )
     if not claim_result["granted"]:
         return {
             "status": "AUTHORIZATION_ALREADY_CONSUMED",
@@ -734,21 +944,39 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
             "detail": None,
             "existing_intent_id": claim_result.get("existing_intent_id"),
             "submission_result": None,
+            "claim_granted": False,
         }
 
-    revalidation = revalidate_before_submission(
-        record, execution_spec, config=cfg, ledger_base_dir=ledger_base_dir,
-        claims_dir=authorization_claims_dir, now=moment,
-    )
-    if revalidation["status"] != "REVALIDATED":
-        return {
-            "status": "REVALIDATION_FAILED",
-            "authorization_id": authorization_id,
-            "reason": revalidation.get("reason"),
-            "detail": revalidation.get("detail"),
-            "existing_intent_id": None,
-            "submission_result": None,
-        }
+    # v0.5.3.40 ceiling check -- fail-closed backstop for the residual
+    # claim-to-submit race, only meaningful when a price check actually
+    # happened above. The claim just granted stays consumed regardless
+    # of this check's outcome -- never released.
+    price_check = revalidation.get("price_check")
+    if price_check is not None:
+        kwargs: dict[str, Any] = {}
+        if max_revalidation_to_submission_seconds is not None:
+            kwargs["max_seconds"] = max_revalidation_to_submission_seconds
+        v40 = revalidation40 or _load_revalidation_module()
+        try:
+            v40.check_revalidation_to_submission_ceiling(
+                price_checked_at=price_check["price_checked_at"], now_dt=moment, **kwargs
+            )
+        except v40.RevalidationRejected as exc:
+            return {
+                "status": "REVALIDATION_FAILED",
+                "authorization_id": authorization_id,
+                "reason": exc.reason,
+                "detail": exc.detail,
+                "existing_intent_id": None,
+                "submission_result": None,
+                # Unlike the pre-claim REVALIDATION_FAILED above, the
+                # authorization_id claim WAS just granted (the ceiling
+                # check runs only after a successful claim, step 3) --
+                # it remains permanently consumed. See claim_granted's
+                # docstring entry above the structural guard for why this
+                # distinction matters to callers (v0.5.3.38).
+                "claim_granted": True,
+            }
 
     adapter27 = _load_adapter_module()
     try:
@@ -761,9 +989,22 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
             "detail": None,
             "existing_intent_id": None,
             "submission_result": None,
+            "claim_granted": True,
         }
 
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(revalidation40, "record_submission_attempted",
+                                  client_order_id, base_dir=audit_dir)
+
     submission_result = adapter27.submit(validated_spec, adapter_claims_dir, exchange=exchange)
+
+    if audit_dir is not None and client_order_id:
+        _audit_write_best_effort(
+            revalidation40, "record_outcome", client_order_id,
+            outcome=submission_result.get("status", "UNKNOWN"),
+            detail=submission_result.get("reason"),
+            base_dir=audit_dir,
+        )
 
     if submission_result.get("status") == "DUPLICATE_CLAIM_REJECTED":
         return {
@@ -773,6 +1014,7 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
             "detail": "authorization_id claim is permanently consumed and will not be released or retried",
             "existing_intent_id": None,
             "submission_result": submission_result,
+            "claim_granted": True,
         }
 
     return {
@@ -782,4 +1024,5 @@ def authorized_submit(record: dict[str, Any], execution_spec: dict[str, Any],
         "detail": None,
         "existing_intent_id": None,
         "submission_result": submission_result,
+        "claim_granted": True,
     }

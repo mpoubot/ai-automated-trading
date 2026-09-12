@@ -408,6 +408,7 @@ def build_canonical_execution_specification(
     time_in_force: str | None = None,
     expires_at: str | None = None,
     evidence_hash: str | None = None,
+    reference_price: Any = None,
 ) -> dict[str, Any]:
     """The canonical, venue-agnostic Execution Specification. Every branch
     below fails closed via fail() (RuntimeError) on the first malformed or
@@ -463,6 +464,32 @@ def build_canonical_execution_specification(
         limit_price_decimal = _decimal_positive(limit_price, "limit_price")
     elif limit_price is not None:
         fail("LIMIT_PRICE_SET_WITHOUT_LIMIT_ORDER_TYPE")
+
+    # reference_price (added v0.5.3.40): the price the decision/sizing
+    # calculation was actually made against -- caller-supplied, exactly
+    # like quantity, never computed or fetched here (this module performs
+    # no financial computation and makes no network call, by design --
+    # see module docstring). For a LIMIT order this MUST equal
+    # limit_price when both are given (a limit order's own committed
+    # price IS its reference price -- Martin's explicit instruction);
+    # divergence is a spec-construction error, not a runtime revalidation
+    # concern, so it fails closed here rather than being silently
+    # resolved one way or the other. For a MARKET order, no such
+    # structural anchor exists -- reference_price is optional at this
+    # layer; v0.5.3.40's revalidation gate (not this module) is what
+    # fails closed (NO_REFERENCE_PRICE_AVAILABLE) if it's absent when a
+    # live-price drift check is attempted. This module's job stops at
+    # validating and fingerprinting whatever it's given, exactly the same
+    # boundary quantity already draws.
+    reference_price_decimal: Decimal | None = None
+    if reference_price is not None:
+        reference_price_decimal = _decimal_positive(reference_price, "reference_price")
+        if (
+            order_type == "LIMIT"
+            and limit_price_decimal is not None
+            and reference_price_decimal != limit_price_decimal
+        ):
+            fail("LIMIT_REFERENCE_PRICE_MISMATCH")
 
     # Futures-only fields (leverage) must not be imposed on non-futures
     # asset classes -- explicit test requirement.
@@ -528,6 +555,7 @@ def build_canonical_execution_specification(
         "quantity": str(quantity_decimal),
         "order_type": order_type,
         "limit_price": str(limit_price_decimal) if limit_price_decimal is not None else None,
+        "reference_price": str(reference_price_decimal) if reference_price_decimal is not None else None,
         "leverage": leverage_int,
         "reduce_only": reduce_only,
         "time_in_force": time_in_force,
@@ -626,6 +654,14 @@ def to_mexc_execution_spec(
         "reduce_only": reduce_only,
         "quantity": spec["quantity"],
         "client_order_id": spec["client_order_id"],
+        # Added v0.5.3.40: .31 only ever sees this wire dict, never the
+        # canonical spec, so reference_price must be carried across the
+        # translation explicitly or v0.5.3.40's revalidation gate would
+        # have nothing to check drift against on the MEXC path. May be
+        # None (see build_canonical_execution_specification's docstring
+        # note above) -- carried through unchanged either way, never
+        # defaulted here.
+        "reference_price": spec.get("reference_price"),
     }
     if not reduce_only:
         wire["leverage"] = spec.get("leverage")
