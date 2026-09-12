@@ -154,6 +154,7 @@ data/
 research/regime_backtest/
 research/regime_backtest_v2/
 research/exit_policy_backtest/
+research/mexc_crypto_signal_research_v05342/
 
 # Environments
 .env
