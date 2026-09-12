@@ -58,6 +58,23 @@ whoever owns the trading strategy research. It is never inferred by
 this module and must never be inferred by an AI agent acting on its
 behalf.
 
+OPTIONAL --promotion-input (added by v0.5.3.39, additive only)
+------------------------------------------------------------------
+By default (no --promotion-input given), both allowlists are exactly the
+module-level empty frozensets above, exactly as before v0.5.3.39 existed.
+When --promotion-input is given, it must point at a v0.5.3.39 Strategy
+Registry promotion-snapshot JSON file (engine == "PROMOTION_SNAPSHOT",
+self-hash verified). Its validated_long_entry_regime_labels /
+validated_short_entry_regime_labels lists are then used INSTEAD of the
+module-level empty frozensets for this run only -- determine_side() itself
+is unchanged and still only ever consults these two names. Any problem
+loading or verifying the snapshot (missing file, wrong engine, hash
+mismatch, non-string label) falls back to the empty allowlists -- exactly
+today's behavior -- and is recorded in the result's
+"promotion_input_warnings" field, never partially trusted and never
+silently ignored. This is the mechanism v0.5.3.39 closes the empty-gate
+finding through: it does not create a second, parallel promotion path.
+
 QUANTITY POLICY
 -----------------
 No file anywhere in the v0.5.3.12-.20 chain computes a position size
@@ -152,6 +169,54 @@ def load_sizing_config(path: Path | None) -> dict[str, Any]:
         return {}
     payload = load_json(path)
     return payload
+
+
+def resolve_direction_allowlists(
+    promotion_input: Path | None,
+) -> tuple[frozenset[str], frozenset[str], list[str]]:
+    """Returns (long_labels, short_labels, warnings). See the module
+    docstring's "OPTIONAL --promotion-input" section. This function never
+    raises -- any failure degrades to the module's own empty allowlists
+    and is reported in `warnings`, matching this module's fail-closed
+    convention everywhere else."""
+    if promotion_input is None:
+        return VALIDATED_LONG_ENTRY_REGIME_LABELS, VALIDATED_SHORT_ENTRY_REGIME_LABELS, []
+
+    warnings: list[str] = []
+    try:
+        with promotion_input.open("r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+        if not isinstance(snapshot, dict):
+            raise ValueError("PROMOTION_INPUT_NOT_OBJECT")
+        if snapshot.get("engine") != "PROMOTION_SNAPSHOT":
+            raise ValueError("PROMOTION_INPUT_WRONG_ENGINE")
+
+        canonical = {
+            "engine": snapshot.get("engine"),
+            "validated_long_entry_regime_labels": snapshot.get(
+                "validated_long_entry_regime_labels"
+            ),
+            "validated_short_entry_regime_labels": snapshot.get(
+                "validated_short_entry_regime_labels"
+            ),
+            "conflicts": snapshot.get("conflicts"),
+            "corrupted_records": snapshot.get("corrupted_records"),
+        }
+        calculated_hash = sha256_text(stable_json(canonical))
+        if calculated_hash != snapshot.get("state_hash"):
+            raise ValueError("PROMOTION_INPUT_STATE_HASH_MISMATCH")
+
+        long_raw = snapshot.get("validated_long_entry_regime_labels")
+        short_raw = snapshot.get("validated_short_entry_regime_labels")
+        if not isinstance(long_raw, list) or not isinstance(short_raw, list):
+            raise ValueError("PROMOTION_INPUT_LABELS_NOT_LISTS")
+        if not all(isinstance(x, str) for x in (*long_raw, *short_raw)):
+            raise ValueError("PROMOTION_INPUT_LABEL_NOT_STRING")
+
+        return frozenset(long_raw), frozenset(short_raw), warnings
+    except Exception as exc:
+        warnings.append(f"PROMOTION_INPUT_REJECTED:{type(exc).__name__}:{exc}")
+        return frozenset(), frozenset(), warnings
 
 
 def determine_side(regime_state: Any) -> str | None:
@@ -491,9 +556,28 @@ def main() -> int:
         "symbol to reach EXECUTION_SPEC_READY; omitted entirely means every "
         "symbol fails closed with MISSING_QUANTITY_SOURCE.",
     )
+    parser.add_argument(
+        "--promotion-input",
+        type=Path,
+        default=None,
+        help="Optional v0.5.3.39 promotion-snapshot JSON. Omitted by default "
+        "-- both direction allowlists then remain this module's own empty "
+        "frozensets, exactly as before v0.5.3.39 existed. When supplied, "
+        "must verify as a genuine v0.5.3.39 PROMOTION_SNAPSHOT; any load or "
+        "verification failure falls back to empty allowlists and is "
+        "recorded in the output's promotion_input_warnings, never "
+        "partially trusted.",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+
+    global VALIDATED_LONG_ENTRY_REGIME_LABELS, VALIDATED_SHORT_ENTRY_REGIME_LABELS
+    long_labels, short_labels, promotion_warnings = resolve_direction_allowlists(
+        args.promotion_input
+    )
+    VALIDATED_LONG_ENTRY_REGIME_LABELS = long_labels
+    VALIDATED_SHORT_ENTRY_REGIME_LABELS = short_labels
 
     try:
         signal_payload = load_json(args.signal_input)
@@ -502,6 +586,7 @@ def main() -> int:
         result = build_specs(
             signal_payload, safety_payload, sizing_config, args.signal_input, args.safety_input
         )
+        result["promotion_input_warnings"] = promotion_warnings
         write_json(args.output, result)
         print_report(result, args.output)
         return 0
@@ -509,6 +594,7 @@ def main() -> int:
         result = base_result(args.signal_input, args.safety_input)
         result["blocked_reasons"] = [f"UNEXPECTED_ENGINE_ERROR:{type(exc).__name__}"]
         result = finalize(result)
+        result["promotion_input_warnings"] = promotion_warnings
         try:
             write_json(args.output, result)
             print_report(result, args.output)

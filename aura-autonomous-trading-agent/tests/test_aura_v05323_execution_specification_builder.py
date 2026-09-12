@@ -34,6 +34,7 @@ def _load(module_filename: str, module_name: str):
 
 builder = _load("aura_v05323_execution_specification_builder.py", "aura_v05323_builder")
 adapter = _load("aura_v05322_alpaca_paper_execution_adapter.py", "aura_v05322_adapter")
+registry = _load("aura_v05339_strategy_registry.py", "aura_v05339_registry_for_23_tests")
 
 SYMBOLS = ("BTC/USD", "ETH/USD")
 FROZEN_BEAR_CANDIDATE = "BEAR x LOW ATR x POSITIVE bar-2"
@@ -314,10 +315,193 @@ def test_optional_symbol_missing_quantity_blocks_only_that_symbol():
         builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = original
 
 
+# ---------------------------------------------------------------------------
+# v0.5.3.39 --promotion-input: default behavior unchanged, fail-closed on
+# any load/verification problem, and one end-to-end test that wires the
+# REAL v0.5.3.39 registry output into the REAL v0.5.3.23 functions rather
+# than a hand-built fixture (the .12 FROZEN_CANDIDATE bug is the reason
+# this project now insists on at least one such test per integration seam).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_direction_allowlists_defaults_to_module_empty_frozensets_when_none_given():
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(None)
+    expect("no promotion-input -> module's own long frozenset", long_labels is builder.VALIDATED_LONG_ENTRY_REGIME_LABELS)
+    expect("no promotion-input -> module's own short frozenset", short_labels is builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS)
+    expect("no warnings when promotion-input wasn't requested", warnings == [])
+
+
+def test_resolve_direction_allowlists_missing_file_fails_closed(tmp_path):
+    missing = tmp_path / "does-not-exist.json"
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(missing)
+    expect("missing file -> empty long allowlist", long_labels == frozenset())
+    expect("missing file -> empty short allowlist", short_labels == frozenset())
+    expect("missing file is reported as a warning, not silently ignored", any("PROMOTION_INPUT_REJECTED" in w for w in warnings))
+
+
+def test_resolve_direction_allowlists_malformed_json_fails_closed(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(bad)
+    expect("malformed JSON -> empty allowlists", long_labels == frozenset() and short_labels == frozenset())
+    expect("malformed JSON reported", any("PROMOTION_INPUT_REJECTED" in w for w in warnings))
+
+
+def test_resolve_direction_allowlists_wrong_engine_fails_closed(tmp_path):
+    wrong = tmp_path / "wrong-engine.json"
+    wrong.write_text('{"engine": "SOMETHING_ELSE"}', encoding="utf-8")
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(wrong)
+    expect("wrong engine -> empty allowlists", long_labels == frozenset() and short_labels == frozenset())
+    expect("wrong engine reported", any("PROMOTION_INPUT_REJECTED" in w for w in warnings))
+
+
+def test_resolve_direction_allowlists_tampered_hash_fails_closed(tmp_path):
+    snapshot = registry.build_promotion_snapshot(tmp_path)  # empty registry -> trivially valid snapshot
+    snapshot["validated_long_entry_regime_labels"] = ["INJECTED_LABEL"]  # tamper after hashing
+    path = tmp_path / "tampered-snapshot.json"
+    path.write_text(__import__("json").dumps(snapshot), encoding="utf-8")
+
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(path)
+    expect("tampered snapshot -> empty allowlists, injected label never trusted", "INJECTED_LABEL" not in long_labels)
+    expect("tampered snapshot -> empty short allowlist too", short_labels == frozenset())
+    expect("hash mismatch reported", any("STATE_HASH_MISMATCH" in w for w in warnings))
+
+
+def test_resolve_direction_allowlists_loads_genuine_snapshot(tmp_path):
+    record = registry.register_strategy(
+        registry.freeze_spec(
+            strategy_name="promotion-input-loader-test",
+            version=1,
+            regime_state_label="TEST_GENUINE_LONG",
+            direction="LONG",
+            source_kind="DETERMINISTIC_RESEARCH",
+            proposed_by="test-suite",
+        ),
+        tmp_path,
+    )
+    for category in registry.EVIDENCE_CATEGORIES:
+        registry.record_evidence(
+            strategy_id=record["strategy_id"], category=category, status="PASS",
+            evidence_ref="ref", recorded_by="test-suite", registry_dir=tmp_path,
+        )
+    registry.apply_evaluation(record["strategy_id"], tmp_path)
+    snapshot = registry.build_promotion_snapshot(tmp_path)
+    path = tmp_path / "genuine-snapshot.json"
+    path.write_text(__import__("json").dumps(snapshot), encoding="utf-8")
+
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(path)
+    expect("genuine snapshot loads its promoted label", "TEST_GENUINE_LONG" in long_labels)
+    expect("no warnings for a genuine, verified snapshot", warnings == [])
+
+
+def test_real_v05339_promotion_feeds_real_v05323_build_specs_end_to_end(tmp_path):
+    """The integration-seam test v0.5.3.10 explicitly asked for: the actual
+    v0.5.3.39 registry produces a real promotion snapshot, that snapshot is
+    loaded by the actual v0.5.3.23 loader, and the actual v0.5.3.23
+    determine_side()/build_specs() path is exercised end-to-end -- no
+    hand-built fixture stands in for either module's own logic."""
+    spec = registry.freeze_spec(
+        strategy_name="btc-eth-integration-test-strategy",
+        version=1,
+        regime_state_label="TEST_INTEGRATION_LONG_LABEL",
+        direction="LONG",
+        source_kind="DETERMINISTIC_RESEARCH",
+        proposed_by="test-suite",
+    )
+    record = registry.register_strategy(spec, tmp_path)
+    for category in registry.EVIDENCE_CATEGORIES:
+        registry.record_evidence(
+            strategy_id=record["strategy_id"], category=category, status="PASS",
+            evidence_ref="ref", recorded_by="test-suite", registry_dir=tmp_path,
+        )
+    evaluated = registry.apply_evaluation(record["strategy_id"], tmp_path)
+    state, _ = registry.derive_state(evaluated["events"])
+    expect("fixture strategy actually reached PROMOTED via the real gate", state == "PROMOTED")
+
+    real_snapshot = registry.build_promotion_snapshot(tmp_path)
+    snapshot_path = tmp_path / "real-promotion-snapshot.json"
+    snapshot_path.write_text(__import__("json").dumps(real_snapshot), encoding="utf-8")
+
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(snapshot_path)
+    expect("no warnings loading the real snapshot", warnings == [])
+
+    original_long = builder.VALIDATED_LONG_ENTRY_REGIME_LABELS
+    original_short = builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS
+    try:
+        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = long_labels
+        builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS = short_labels
+
+        signal = make_signal_payload({s: "TEST_INTEGRATION_LONG_LABEL" for s in SYMBOLS})
+        safety = make_safety_payload()
+        result = run_build(signal, safety, sizing_config={"BTC/USD": 0.01, "ETH/USD": 0.05})
+
+        expect("real .39 promotion authorizes a real .23 EXECUTION_SPEC_READY", result["overall_status"] == "EXECUTION_SPEC_READY")
+        for symbol in SYMBOLS:
+            item = result["decisions"][symbol]
+            expect(f"{symbol} spec ready via genuine promotion chain", item["status"] == "EXECUTION_SPEC_READY")
+            expect(f"{symbol} side is BUY (LONG -> BUY translation)", item["execution_specification"]["side"] == "BUY")
+    finally:
+        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = original_long
+        builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS = original_short
+
+
+def test_unrelated_regime_label_still_blocked_even_with_a_valid_promotion_snapshot_present(tmp_path):
+    """A promotion snapshot authorizing one label must not accidentally
+    authorize a different, unrelated label -- the allowlist stays closed
+    for everything it doesn't explicitly name."""
+    record = registry.register_strategy(
+        registry.freeze_spec(
+            strategy_name="only-this-label",
+            version=1,
+            regime_state_label="TEST_ONLY_THIS_LABEL",
+            direction="LONG",
+            source_kind="DETERMINISTIC_RESEARCH",
+            proposed_by="test-suite",
+        ),
+        tmp_path,
+    )
+    for category in registry.EVIDENCE_CATEGORIES:
+        registry.record_evidence(
+            strategy_id=record["strategy_id"], category=category, status="PASS",
+            evidence_ref="ref", recorded_by="test-suite", registry_dir=tmp_path,
+        )
+    registry.apply_evaluation(record["strategy_id"], tmp_path)
+    snapshot_path = tmp_path / "narrow-snapshot.json"
+    snapshot_path.write_text(__import__("json").dumps(registry.build_promotion_snapshot(tmp_path)), encoding="utf-8")
+
+    long_labels, short_labels, warnings = builder.resolve_direction_allowlists(snapshot_path)
+    original_long = builder.VALIDATED_LONG_ENTRY_REGIME_LABELS
+    original_short = builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS
+    try:
+        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = long_labels
+        builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS = short_labels
+
+        signal = make_signal_payload({s: FROZEN_BEAR_CANDIDATE for s in SYMBOLS})
+        safety = make_safety_payload()
+        result = run_build(signal, safety, sizing_config={s: 0.01 for s in SYMBOLS})
+
+        expect("BEAR regime label is still blocked", result["overall_status"] != "EXECUTION_SPEC_READY")
+        for symbol in SYMBOLS:
+            expect(f"{symbol} reason is NO_VALIDATED_EXECUTION_DIRECTION", result["decisions"][symbol]["reason"] == "NO_VALIDATED_EXECUTION_DIRECTION")
+    finally:
+        builder.VALIDATED_LONG_ENTRY_REGIME_LABELS = original_long
+        builder.VALIDATED_SHORT_ENTRY_REGIME_LABELS = original_short
+
+
 def main() -> int:
+    import inspect
+    import tempfile
+
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     for test in tests:
-        test()
+        params = inspect.signature(test).parameters
+        if "tmp_path" in params:
+            with tempfile.TemporaryDirectory() as d:
+                test(Path(d))
+        elif "capsys" in params:
+            continue  # capsys is a pytest-only fixture; skip under standalone execution
+        else:
+            test()
     print(f"AURA v0.5.3.23 CONTRACT: {len(tests)}/{len(tests)} PASS")
     return 0
 
