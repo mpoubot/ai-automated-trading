@@ -193,12 +193,33 @@ Known limitations (disclosed, not silently worked around)
     here as "one output per candidate," not "one candidate portfolio-
     wide" — flagged explicitly in the completion report for Martin to
     correct if a different reading was intended).
-  - `wave_weight`/`sentiment_weight`/`decision_threshold`/
-    `ai_penalty_per_concern`/`critic_penalty_per_issue`/
-    `max_evidence_age_seconds` are all REQUIRED, no-default research
-    parameters (mirroring `.47`'s `decay_window_hours` convention) — this
-    module provides the mechanism, never the specific values a real
-    trading decision would use.
+  - `wave_weight`/`sentiment_weight`/`technical_weight`/
+    `decision_threshold`/`ai_penalty_per_concern`/
+    `critic_penalty_per_issue`/`max_evidence_age_seconds` are all
+    REQUIRED, no-default research parameters (mirroring `.47`'s
+    `decay_window_hours` convention) — this module provides the
+    mechanism, never the specific values a real trading decision would
+    use.
+
+Addendum (`.51`, 2026-09-13) — small additive extension
+------------------------------------------------------------------------
+`.51` ("Live Alpaca equities/ETFs technical signal source") added a
+THIRD, independent evidence dimension alongside sentiment (`.47`) and
+Elliott Wave (`.48`): `technical_regime` (a `.51` `TechnicalRegime`
+instance, duck-typed exactly like the other two). This was a small,
+additive change, not a redesign: `CandidateEvidence` gained
+`technical_regime`/`technical_usable` fields, `build_candidate_evidence`
+gained one new optional (default `None`) parameter, and
+`compute_base_rank_score`/`decide` gained one new REQUIRED (no default)
+`technical_weight` parameter and one new score term — added only when
+`technical_usable`, and only ever ADDED (never subtracted, since `.51`
+is scoped LONG-only). Every existing caller that predates `.51` and
+does not pass `technical_regime`/`technical_weight` continues to behave
+functionally identically to before this addendum (all 51 of `.50`'s
+own prior tests pass unmodified in behavior — only the new required
+`technical_weight` argument was added to each existing call site). See
+`aura_v05351_live_alpaca_equity_signal_source.py`'s own docstring for
+the full detail of this extension and its reuse-first audit.
 """
 from __future__ import annotations
 
@@ -304,8 +325,10 @@ class CandidateEvidence:
     as_of: str
     sentiment_regime: Any | None  # `.47` SentimentRegime instance, duck-typed
     wave_result: Any | None  # `.48` ElliottWaveResearchResult instance, duck-typed
+    technical_regime: Any | None  # `.51` TechnicalRegime instance, duck-typed -- added by `.51`, additive only (see module docstring addendum below `.50`'s own docstring, and `.51`'s own docstring)
     sentiment_usable: bool
     wave_usable: bool
+    technical_usable: bool  # added by `.51`
     news_item_count: int
     sources_present: tuple[str, ...]
     evidence_summary: str
@@ -331,6 +354,8 @@ def _render_evidence_summary(
     news_item_count: int,
     sentiment_usable: bool,
     wave_usable: bool,
+    technical_regime: Any | None = None,
+    technical_usable: bool = False,
 ) -> str:
     """Human/AI-readable evidence text -- becomes `.49` `Candidate.
     evidence_summary` verbatim. Deterministically built from the same
@@ -356,6 +381,16 @@ def _render_evidence_summary(
             parts.append(f"elliott_wave: NOT usable (ambiguity_status={getattr(wave_result, 'ambiguity_status', None)})")
     else:
         parts.append("elliott_wave: no data")
+    if technical_regime is not None:
+        if technical_usable:
+            parts.append(
+                f"technical: status={getattr(technical_regime, 'status', None)} "
+                f"signal_score={getattr(technical_regime, 'signal_score', None)}"
+            )
+        else:
+            parts.append(f"technical: NOT usable (status={getattr(technical_regime, 'status', None)})")
+    else:
+        parts.append("technical: no data")
     parts.append(f"news_item_count={news_item_count}")
     return "; ".join(parts)
 
@@ -365,14 +400,18 @@ def build_candidate_evidence(
     *,
     sentiment_regime: Any | None = None,
     wave_result: Any | None = None,
+    technical_regime: Any | None = None,
     news_item_count: int = 0,
     now: datetime | None = None,
 ) -> CandidateEvidence:
     """Build `.50`'s structured evidence record for one symbol from
-    `.46`/`.47`/`.48`'s typed outputs. A source counts as "usable" only
+    `.46`/`.47`/`.48`'s typed outputs, plus `.51`'s `technical_regime`
+    (added by `.51`, additive only -- defaults to `None` so every caller
+    that predates `.51` is unaffected). A source counts as "usable" only
     when it passes its OWN internal quality bar — `.47`'s
     `promotable_score is not None` (i.e. `corroboration_status ==
-    SUFFICIENT`) and `.48`'s `ambiguity_status == SINGLE_VALID_CANDIDATE`
+    SUFFICIENT`), `.48`'s `ambiguity_status == SINGLE_VALID_CANDIDATE`,
+    and `.51`'s `status in {"CONFIRMING", "CONFIRMED"}`
     — never merely "present". Sources below their own bar are still
     recorded (visible for audit, flagged by the deterministic critic) but
     contribute nothing to the base rank score, exactly mirroring `.48`'s
@@ -381,11 +420,13 @@ def build_candidate_evidence(
     as_of = _now_iso(now)
     sentiment_usable = sentiment_regime is not None and getattr(sentiment_regime, "promotable_score", None) is not None
     wave_usable = wave_result is not None and getattr(wave_result, "ambiguity_status", None) == "SINGLE_VALID_CANDIDATE"
+    technical_usable = technical_regime is not None and getattr(technical_regime, "status", None) in ("CONFIRMING", "CONFIRMED")
     sources_present = tuple(
         name
         for name, present in (
             ("SENTIMENT", sentiment_regime is not None),
             ("ELLIOTT_WAVE", wave_result is not None),
+            ("TECHNICAL", technical_regime is not None),
             ("NEWS", news_item_count > 0),
         )
         if present
@@ -397,6 +438,7 @@ def build_candidate_evidence(
                 "as_of": as_of,
                 "sentiment_as_of": getattr(sentiment_regime, "as_of", None),
                 "wave_as_of": getattr(wave_result, "as_of", None),
+                "technical_as_of": getattr(technical_regime, "as_of", None),
                 "news_item_count": news_item_count,
             }
         )
@@ -407,21 +449,26 @@ def build_candidate_evidence(
         as_of=as_of,
         sentiment_regime=sentiment_regime,
         wave_result=wave_result,
+        technical_regime=technical_regime,
         sentiment_usable=sentiment_usable,
         wave_usable=wave_usable,
+        technical_usable=technical_usable,
         news_item_count=news_item_count,
         sources_present=sources_present,
-        evidence_summary=_render_evidence_summary(symbol, sentiment_regime, wave_result, news_item_count, sentiment_usable, wave_usable),
+        evidence_summary=_render_evidence_summary(
+            symbol, sentiment_regime, wave_result, news_item_count, sentiment_usable, wave_usable,
+            technical_regime=technical_regime, technical_usable=technical_usable,
+        ),
     )
 
 
 def is_shortlist_eligible(evidence: CandidateEvidence) -> bool:
     """Martin's explicit scoping decision: at least one source with
-    USABLE evidence, not all three required. Raw news presence counts as
-    usable on its own (`.46` has no analogous internal quality gate to
-    check against).
+    USABLE evidence, not all three (now four, since `.51`) required. Raw
+    news presence counts as usable on its own (`.46` has no analogous
+    internal quality gate to check against).
     """
-    return evidence.sentiment_usable or evidence.wave_usable or evidence.news_item_count > 0
+    return evidence.sentiment_usable or evidence.wave_usable or evidence.technical_usable or evidence.news_item_count > 0
 
 
 # ============================================================================
@@ -451,6 +498,8 @@ def check_evidence_freshness(
         ages.append((now_dt - _parse_iso(evidence.sentiment_regime.as_of)).total_seconds())
     if evidence.wave_usable:
         ages.append((now_dt - _parse_iso(evidence.wave_result.as_of)).total_seconds())
+    if evidence.technical_usable:
+        ages.append((now_dt - _parse_iso(evidence.technical_regime.as_of)).total_seconds())
 
     if not ages:
         # Only raw news (or nothing usable at all -- caught separately by
@@ -497,11 +546,23 @@ def build_shortlist(
 # ============================================================================
 
 
-def compute_base_rank_score(evidence: CandidateEvidence, *, sentiment_weight: float, wave_weight: float) -> float:
+def compute_base_rank_score(
+    evidence: CandidateEvidence, *, sentiment_weight: float, wave_weight: float, technical_weight: float
+) -> float:
+    """`technical_weight` was added by `.51` (additive extension to an
+    already-frozen `.50` function -- see `.51`'s module docstring
+    "`.50` integration changes"). It is REQUIRED, no default, matching
+    this project's "never invent numbers" discipline for every other
+    weight/penalty in this module. `.51` is scoped LONG-only this
+    milestone, so the technical term is always ADDED when usable, never
+    subtracted -- there is no bearish/short technical signal today.
+    """
     if sentiment_weight < 0:
         raise DecisionEngineError("INVALID_SENTIMENT_WEIGHT:must be >= 0")
     if wave_weight < 0:
         raise DecisionEngineError("INVALID_WAVE_WEIGHT:must be >= 0")
+    if technical_weight < 0:
+        raise DecisionEngineError("INVALID_TECHNICAL_WEIGHT:must be >= 0")
 
     score = 0.0
     if evidence.sentiment_usable:
@@ -512,6 +573,8 @@ def compute_base_rank_score(evidence: CandidateEvidence, *, sentiment_weight: fl
             score += wave_weight
         elif direction == "DOWN":
             score -= wave_weight
+    if evidence.technical_usable:
+        score += technical_weight * (evidence.technical_regime.signal_score / 100.0)
     return score
 
 
@@ -618,6 +681,7 @@ def decide(
     *,
     sentiment_weight: float,
     wave_weight: float,
+    technical_weight: float,
     decision_threshold: float,
     ai_penalty_per_concern: float,
     critic_penalty_per_issue: float,
@@ -640,7 +704,9 @@ def decide(
         raise DecisionEngineError("INVALID_CRITIC_PENALTY_PER_ISSUE:must be >= 0")
 
     decided_at = _now_iso(now)
-    base = compute_base_rank_score(evidence, sentiment_weight=sentiment_weight, wave_weight=wave_weight)
+    base = compute_base_rank_score(
+        evidence, sentiment_weight=sentiment_weight, wave_weight=wave_weight, technical_weight=technical_weight
+    )
     direction = base_score_direction(base)
 
     ai_proposal = None

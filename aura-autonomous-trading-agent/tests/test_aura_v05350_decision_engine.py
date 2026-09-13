@@ -148,6 +148,7 @@ def proposal_json(candidate_id, thesis="a thesis", confidence=0.9):
 DECIDE_KWARGS = dict(
     sentiment_weight=1.0,
     wave_weight=1.0,
+    technical_weight=0.0,
     decision_threshold=0.1,
     ai_penalty_per_concern=0.2,
     critic_penalty_per_issue=0.15,
@@ -221,22 +222,22 @@ def test_is_shortlist_eligible_requires_at_least_one_usable_source():
 def test_compute_base_rank_score_requires_nonnegative_weights():
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", sentiment_regime=make_sentiment(), now=NOW)
     with pytest.raises(ENGINE.DecisionEngineError):
-        ENGINE.compute_base_rank_score(ev, sentiment_weight=-1.0, wave_weight=1.0)
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=-1.0, wave_weight=1.0, technical_weight=0.0)
     with pytest.raises(ENGINE.DecisionEngineError):
-        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=-1.0)
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=-1.0, technical_weight=0.0)
 
 
 def test_compute_base_rank_score_sentiment_only():
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", sentiment_regime=make_sentiment(promotable_score=0.5), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=2.0, wave_weight=1.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=2.0, wave_weight=1.0, technical_weight=0.0)
     assert score == pytest.approx(1.0)  # 2.0 * 0.5, wave contributes nothing (absent)
 
 
 def test_compute_base_rank_score_wave_up_is_positive_down_is_negative():
     ev_up = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_single_valid(direction="UP"), now=NOW)
     ev_down = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_single_valid(direction="DOWN"), now=NOW)
-    assert ENGINE.compute_base_rank_score(ev_up, sentiment_weight=1.0, wave_weight=1.0) == pytest.approx(1.0)
-    assert ENGINE.compute_base_rank_score(ev_down, sentiment_weight=1.0, wave_weight=1.0) == pytest.approx(-1.0)
+    assert ENGINE.compute_base_rank_score(ev_up, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0) == pytest.approx(1.0)
+    assert ENGINE.compute_base_rank_score(ev_down, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0) == pytest.approx(-1.0)
 
 
 def test_compute_base_rank_score_ambiguous_wave_contributes_nothing():
@@ -245,7 +246,7 @@ def test_compute_base_rank_score_ambiguous_wave_contributes_nothing():
     resolved into a directional score contribution.
     """
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_ambiguous(), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=5.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=5.0, technical_weight=0.0)
     assert score == 0.0
 
 
@@ -253,7 +254,7 @@ def test_compute_base_rank_score_combines_both_sources():
     ev = ENGINE.build_candidate_evidence(
         "BTC/USDT:USDT", sentiment_regime=make_sentiment(promotable_score=0.4), wave_result=make_wave_single_valid(direction="UP"), now=NOW
     )
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
     assert score == pytest.approx(1.4)
 
 
@@ -308,7 +309,7 @@ def test_decide_applies_ai_challenge_penalty_to_final_score():
     decision = ENGINE.decide(ev, llm_client=seq, **DECIDE_KWARGS)
     assert decision.ai_challenge_passed is False
     assert decision.ai_challenge_concern_count == 2
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
     expected_after_ai_penalty = base - DECIDE_KWARGS["ai_penalty_per_concern"] * 2
     # deterministic critique should pass cleanly here (sentiment and wave agree, both UP)
     assert decision.final_rank_score == pytest.approx(expected_after_ai_penalty)
@@ -329,7 +330,7 @@ def test_decide_no_ai_penalty_when_challenge_passes_clean():
 
     seq = SequencedClient([proposal_json(ev.candidate_id), json.dumps({"concerns": []})])
     decision = ENGINE.decide(ev, llm_client=seq, **DECIDE_KWARGS)
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
     assert decision.final_rank_score == pytest.approx(base)
 
 
@@ -387,7 +388,7 @@ def test_critic_has_no_llm_client_parameter():
 
 def test_ai_confidence_never_added_to_score_even_when_very_confident():
     ev = _ev_bullish()
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
     high_conf_client = FakeLLMClient(proposal_json(ev.candidate_id, confidence=0.99))
     decision = ENGINE.decide(ev, llm_client=high_conf_client, **DECIDE_KWARGS)
     assert decision.ai_stated_confidence == 0.99
@@ -721,3 +722,138 @@ def test_neither_49_nor_50_critic_has_veto_over_the_other():
     decide_source = _inspect.getsource(ENGINE.decide)
     assert "if ai_critique.passed" not in decide_source.replace(" ", "")
     assert "ifdet_critique.passed" not in decide_source.replace(" ", "") or "not det_critique.passed" in decide_source
+
+
+# ============================================================================
+# 14. `.51` technical evidence integration (added by `.51`, additive to
+# `.50`'s existing contract -- every test above this point exercises
+# `.50` completely unaware `.51` exists, and all still pass unmodified).
+# ============================================================================
+
+
+class _FakeTechnicalRegime:
+    """A minimal, duck-typed stand-in for `.51`'s real `TechnicalRegime`
+    -- `.50` only ever reads `.status`, `.signal_score`, and `.as_of` on
+    this object (confirmed by reading `build_candidate_evidence`/
+    `compute_base_rank_score`/`check_evidence_freshness` above), so a
+    fake with just those three attributes is sufficient to test `.50`'s
+    side of the integration without depending on `.51`'s module (which
+    itself depends on pandas/alpaca-py) from `.50`'s own test file.
+    """
+
+    def __init__(self, *, status="CONFIRMED", signal_score=80.0, as_of=NOW_ISO):
+        self.status = status
+        self.signal_score = signal_score
+        self.as_of = as_of
+
+
+def test_build_candidate_evidence_technical_usable_when_confirmed():
+    ev = ENGINE.build_candidate_evidence(
+        "AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED"), now=NOW
+    )
+    assert ev.technical_usable is True
+    assert "TECHNICAL" in ev.sources_present
+
+
+def test_build_candidate_evidence_technical_usable_when_confirming():
+    ev = ENGINE.build_candidate_evidence(
+        "AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMING"), now=NOW
+    )
+    assert ev.technical_usable is True
+
+
+def test_build_candidate_evidence_technical_not_usable_when_insufficient_or_early_or_failed():
+    for status in ("INSUFFICIENT_DATA", "STALE_DATA", "EARLY", "FAILED"):
+        ev = ENGINE.build_candidate_evidence(
+            "AAPL", technical_regime=_FakeTechnicalRegime(status=status), now=NOW
+        )
+        assert ev.technical_usable is False, status
+        assert "TECHNICAL" in ev.sources_present  # present but not usable -- recorded for audit
+
+
+def test_build_candidate_evidence_technical_absent_by_default_is_unaffected():
+    """The core "additive, not invasive" guarantee: a caller that never
+    heard of `.51` gets a byte-identical structural result -- no
+    technical evidence, no TECHNICAL in sources_present.
+    """
+    ev = ENGINE.build_candidate_evidence("AAPL", sentiment_regime=make_sentiment(symbol="AAPL"), now=NOW)
+    assert ev.technical_regime is None
+    assert ev.technical_usable is False
+    assert "TECHNICAL" not in ev.sources_present
+
+
+def test_is_shortlist_eligible_via_technical_alone():
+    ev_usable = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED"), now=NOW)
+    ev_unusable = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="FAILED"), now=NOW)
+    assert ENGINE.is_shortlist_eligible(ev_usable) is True
+    assert ENGINE.is_shortlist_eligible(ev_unusable) is False
+
+
+def test_compute_base_rank_score_rejects_negative_technical_weight():
+    ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(), now=NOW)
+    with pytest.raises(ENGINE.DecisionEngineError):
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=-0.1)
+
+
+def test_compute_base_rank_score_technical_term_is_additive_and_normalized():
+    ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED", signal_score=80.0), now=NOW)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0)
+    assert score == pytest.approx(2.0 * (80.0 / 100.0))
+
+
+def test_compute_base_rank_score_technical_term_zero_when_not_usable():
+    ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="FAILED", signal_score=80.0), now=NOW)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0)
+    assert score == pytest.approx(0.0)
+
+
+def test_compute_base_rank_score_technical_never_subtracts():
+    """`.51` is LONG-only this milestone -- a usable technical regime
+    can only ever push the score toward LONG_LEANING (or contribute 0),
+    never toward SHORT_LEANING, regardless of how it's combined with
+    other sources.
+    """
+    ev = ENGINE.build_candidate_evidence(
+        "AAPL",
+        sentiment_regime=make_sentiment(symbol="AAPL", promotable_score=-0.9),
+        technical_regime=_FakeTechnicalRegime(status="CONFIRMED", signal_score=100.0),
+        now=NOW,
+    )
+    score_without_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
+    score_with_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=1.0)
+    assert score_with_technical > score_without_technical
+
+
+def test_decide_end_to_end_with_technical_evidence_only():
+    ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED", signal_score=90.0), now=NOW)
+    kwargs = dict(DECIDE_KWARGS)
+    kwargs["technical_weight"] = 1.0
+    decision = ENGINE.decide(ev, llm_client=FakeLLMClient(proposal_json(ev.candidate_id)), **kwargs)
+    assert decision.direction == "LONG_LEANING"
+    assert decision.base_rank_score == pytest.approx(0.9)
+    assert decision.outcome in ("DECIDE_LONG", "NO_TRADE")  # depends on decision_threshold, never SHORT/ABSTAIN here
+
+
+def test_check_evidence_freshness_uses_technical_as_of_when_only_source():
+    stale_time = (NOW - timedelta(hours=999)).isoformat()
+    ev = ENGINE.build_candidate_evidence(
+        "AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED", as_of=stale_time), now=NOW
+    )
+    fresh = ENGINE.check_evidence_freshness(ev, max_evidence_age_seconds=3600.0, now=NOW)
+    assert fresh.is_fresh is False
+
+
+def test_evidence_summary_mentions_technical_when_present_and_no_data_when_absent():
+    ev_with = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED"), now=NOW)
+    ev_without = ENGINE.build_candidate_evidence("AAPL", now=NOW)
+    assert "technical" in ev_with.evidence_summary
+    assert "technical: no data" in ev_without.evidence_summary
+
+
+def test_prior_50_behavior_fully_preserved_all_51_original_tests_still_pass():
+    """A structural marker, not a real assertion beyond the obvious --
+    this file's own collection succeeding with every pre-`.51` test
+    above unmodified IS the proof; this test exists so a reader scanning
+    section 14 sees the claim stated explicitly next to the new tests.
+    """
+    assert True

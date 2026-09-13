@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "description": "AURA .51 pinned research starting universe for live equity/ETF technical signal evaluation. This is a RESEARCH STARTING POINT, not a claim that any symbol here is validated for live trading -- see aura_v05351_live_alpaca_equity_signal_source.py module docstring.",
+  "source": "Reused verbatim from multi_symbol_historical_scanner.py:28-68 (v0.4.x research universe), the only vetted default equity/ETF list found anywhere in this repository per the .51 reuse-first audit.",
+  "symbols": [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO",
+    "TSLA", "WMT", "COST",
+    "JPM", "BAC", "GS",
+    "XOM", "CVX",
+    "CAT", "DE", "GE",
+    "LMT", "RTX",
+    "LLY", "JNJ",
+    "SPY", "QQQ", "IWM", "GLD", "SLV"
+  ]
+}
