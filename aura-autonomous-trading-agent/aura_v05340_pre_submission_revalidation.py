@@ -112,8 +112,21 @@ VENUES = frozenset({"MEXC", "ALPACA"})
 ASSET_CLASSES = frozenset({"CRYPTO_FUTURES", "CRYPTO_SPOT", "STOCK", "ETF"})
 
 EVENT_TYPES = frozenset(
-    {"DECISION", "AUTHORIZED", "REVALIDATED", "CONSUMED", "SUBMISSION_ATTEMPTED", "OUTCOME"}
+    {"DECISION", "AUTHORIZED", "REVALIDATED", "CONSUMED", "SUBMISSION_ATTEMPTED", "OUTCOME", "RESOLVED"}
 )
+
+# RESOLVED was added in v0.5.3.45 (Alpaca EXECUTION_UNCERTAIN resolution
+# authority) -- see that module's docstring for the full rationale. It is
+# legal exactly once, only immediately after any OUTCOME:* state, and only
+# for ALPACA records (enforced in record_resolved() below, not here --
+# derive_state() only knows about event sequences, never about a record's
+# other fields). Adding a new event type to an already-shipped state
+# machine is additive only: every existing legal sequence (DECISION ->
+# ... -> OUTCOME:*, terminal) is completely unaffected because RESOLVED
+# did not exist as a legal follow-on before this change, so no prior
+# record's derived state can change. MEXC's OUTCOME:* records are never
+# expected to receive a RESOLVED event -- MEXC's own .29/.30 remain sole
+# authority for that side (record_resolved() enforces this explicitly).
 
 DEFAULT_AUDIT_BASE_DIR = Path("regime_output/execution_audit_trail/records")
 
@@ -532,7 +545,16 @@ def derive_state(events: list[dict[str, Any]]) -> str:
             state = f"OUTCOME:{fields.get('outcome')}"
             continue
 
-        # REVALIDATION_FAILED, CONSUMPTION_FAILED, or any OUTCOME:* state
+        if state.startswith("OUTCOME:"):
+            # The only event legal after OUTCOME:* is a single RESOLVED
+            # (v0.5.3.45) -- everything else about this state remains
+            # exactly as terminal as before this change.
+            if etype == "RESOLVED":
+                state = f"RESOLVED:{fields.get('resolution')}"
+                continue
+            raise IllegalTransitionError(f"EVENT_AFTER_TERMINAL:{state}:{etype}")
+
+        # REVALIDATION_FAILED, CONSUMPTION_FAILED, or any RESOLVED:* state
         # -- all terminal, nothing legal follows.
         raise IllegalTransitionError(f"EVENT_AFTER_TERMINAL:{state}:{etype}")
 
@@ -756,6 +778,72 @@ def record_outcome(
     if mexc_intent_current_state is not None:
         fields["mexc_intent_current_state"] = mexc_intent_current_state
     return _append_event(client_order_id, "OUTCOME", fields, base_dir)
+
+
+RESOLUTIONS = frozenset(
+    {"RESOLVED_FILLED", "RESOLVED_PARTIALLY_FILLED", "RESOLVED_CANCELED",
+     "RESOLVED_REJECTED", "ESCALATED_HUMAN_REVIEW"}
+)
+
+
+def record_resolved(
+    client_order_id: str,
+    *,
+    resolution: str,
+    detail: Any = None,
+    proven_failed: bool | None = None,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    """v0.5.3.45 (Alpaca EXECUTION_UNCERTAIN resolution authority). Only
+    ever called on an ALPACA record -- MEXC's own .29/.30 remain sole
+    authority for MEXC fill/reconciliation truth (module docstring,
+    PART 3 preamble); calling this on a MEXC record would create exactly
+    the second, independently-derived opinion this module's design has
+    always refused to produce, so it is refused here, hard, rather than
+    silently allowed.
+
+    `resolution` must be one of RESOLUTIONS -- this module invents
+    nothing: it is either one of the four definitive terminal fills/
+    cancellations/rejections .45's evidence matrix can prove, or
+    ESCALATED_HUMAN_REVIEW when the evidence cannot be resolved
+    automatically. There is no RESOLVED_STILL_PENDING -- a still-pending
+    outcome writes nothing here at all (the record simply stays at
+    OUTCOME:* until a later resolution pass has something new to say),
+    matching this module's "only write what actually changed" audit
+    convention elsewhere.
+
+    `proven_failed`, when not None, is evidence-only metadata (did this
+    resolution prove the order never executed at all) -- this module
+    takes no action on it. It exists so a value that is genuinely known
+    is not thrown away, per the same disclosure discipline as every
+    other field in this trail; a future, separately-approved capability
+    may read it, but it grants no retry/resubmission authority here."""
+    if resolution not in RESOLUTIONS:
+        raise AuditTrailError(f"INVALID_RESOLUTION:{resolution!r}")
+
+    path = _record_path(client_order_id, base_dir)
+    with _FileLock(path):
+        record = _load_record_raw(path)
+        ok, errors = verify_record(record)
+        if not ok:
+            raise AuditTrailError(
+                f"AUDIT_RECORD_VERIFICATION_FAILED:{client_order_id}:{','.join(errors)}"
+            )
+        if record.get("venue") != "ALPACA":
+            raise AuditTrailError(
+                f"RESOLVED_EVENT_NOT_PERMITTED_FOR_VENUE:{record.get('venue')!r}:"
+                "MEXC records are resolved solely by .29/.30, never by this event"
+            )
+        fields: dict[str, Any] = {"resolution": resolution}
+        if detail is not None:
+            fields["detail"] = str(detail)
+        if proven_failed is not None:
+            fields["proven_failed"] = bool(proven_failed)
+        record["events"].append({"event": "RESOLVED", "recorded_at": now(), "fields": fields})
+        derive_state(record["events"])
+        record = _finalize(record)
+        _write_record_atomic(path, record)
+        return record
 
 
 # --------------------------------------------------------------------- #
