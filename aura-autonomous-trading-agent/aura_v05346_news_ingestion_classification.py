@@ -258,8 +258,18 @@ def classify_news_item(headline: str, summary: str) -> tuple[tuple[str, ...], di
 
 @dataclass(frozen=True)
 class NewsItem:
-    source: str                          # "ALPACA" (only value produced today)
-    external_id: str                     # source's own article id, as a string
+    source: str                          # "ALPACA" (ingestion venue; only value produced today)
+    external_id: str                     # venue's own article id, as a string
+    origin_source: str | None            # the ARTICLE's actual originating outlet, e.g. "Benzinga",
+                                          # "GlobeNewswire" -- verbatim from Alpaca's own `News.source`
+                                          # field. None only if the upstream field was genuinely absent
+                                          # (never fabricated). Distinct from `source` above: `source` is
+                                          # always "ALPACA" (which venue we fetched from); `origin_source`
+                                          # is which wire actually wrote the piece -- the field `.47`'s
+                                          # source-diversity/corroboration check depends on (added
+                                          # 2026-09-13, see `.47`'s completion report for why: `.47`
+                                          # cannot tell genuine multi-outlet corroboration from merely
+                                          # many articles off the same wire without this field).
     headline: str
     summary: str
     url: str | None
@@ -277,6 +287,7 @@ class NewsItem:
         return {
             "source": self.source,
             "external_id": self.external_id,
+            "origin_source": self.origin_source,
             "headline": self.headline,
             "summary": self.summary,
             "url": self.url,
@@ -371,6 +382,7 @@ def fetch_alpaca_news(
         items.append(NewsItem(
             source="ALPACA",
             external_id=str(getattr(article, "id")),
+            origin_source=(getattr(article, "source", None) or None),
             headline=headline,
             summary=summary,
             url=getattr(article, "url", None),

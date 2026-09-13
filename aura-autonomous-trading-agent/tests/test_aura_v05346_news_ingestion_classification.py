@@ -33,7 +33,7 @@ NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
 
 class FakeArticle:
     def __init__(self, id, headline, summary="", url=None, author="Staff",
-                 created_at=None, updated_at=None, symbols=None):
+                 created_at=None, updated_at=None, symbols=None, source="Benzinga"):
         self.id = id
         self.headline = headline
         self.summary = summary
@@ -42,6 +42,7 @@ class FakeArticle:
         self.created_at = created_at or NOW
         self.updated_at = updated_at or NOW
         self.symbols = symbols if symbols is not None else []
+        self.source = source  # the article's own originating outlet, per alpaca-py's News.source
 
 
 class FakeNewsSet:
@@ -130,7 +131,7 @@ def test_fetch_not_configured_when_client_is_none():
 def test_fetch_success_maps_fields_and_classifies():
     article = FakeArticle(
         id=12345, headline="Acme Corp beats Q3 earnings estimates", summary="Strong quarter.",
-        url="https://example.com/a", author="Jane Reporter", symbols=["ACME"],
+        url="https://example.com/a", author="Jane Reporter", symbols=["ACME"], source="Benzinga",
     )
     client = FakeNewsClient(articles=[article])
     items, status = NEWS.fetch_alpaca_news(client, symbols=("ACME",), limit=10, fetched_at=NOW.isoformat())
@@ -141,6 +142,7 @@ def test_fetch_success_maps_fields_and_classifies():
     item = items[0]
     assert item.source == "ALPACA"
     assert item.external_id == "12345"
+    assert item.origin_source == "Benzinga"
     assert item.headline == "Acme Corp beats Q3 earnings estimates"
     assert item.symbols == ("ACME",)
     assert "EARNINGS" in item.categories
@@ -164,6 +166,15 @@ def test_fetch_handles_missing_optional_fields_without_fabricating():
     assert status.status == "SUCCESS"
     assert items[0].url is None
     assert items[0].symbols == ()
+
+
+def test_fetch_origin_source_none_when_genuinely_absent_not_fabricated():
+    article = FakeArticle(id=2, headline="Y", summary="")
+    article.source = None  # simulate upstream field genuinely absent
+    client = FakeNewsClient(articles=[article])
+    items, status = NEWS.fetch_alpaca_news(client)
+    assert status.status == "SUCCESS"
+    assert items[0].origin_source is None
 
 
 def test_fetch_passes_symbol_filter_into_request():
