@@ -220,6 +220,26 @@ own prior tests pass unmodified in behavior — only the new required
 `technical_weight` argument was added to each existing call site). See
 `aura_v05351_live_alpaca_equity_signal_source.py`'s own docstring for
 the full detail of this extension and its reuse-first audit.
+
+Addendum (`.52`, 2026-09-13) — second small additive extension, mirrored
+------------------------------------------------------------------------
+`.52` ("Stock/ETF short-side signal") added a FOURTH, independent
+evidence dimension, mirroring `.51`'s own addendum exactly but sign-
+flipped: `short_technical_regime` (a `.52` `ShortTechnicalRegime`
+instance, duck-typed exactly like the other three). `CandidateEvidence`
+gained `short_technical_regime`/`short_technical_usable` fields,
+`build_candidate_evidence` gained one new optional (default `None`)
+parameter, and `compute_base_rank_score`/`decide` gained one new REQUIRED
+(no default) `short_technical_weight` parameter and one new score term —
+added only when `short_technical_usable`, and always SUBTRACTED (never
+added), since `.52` is scoped SHORT-only. Every existing caller that
+predates `.52` and does not pass `short_technical_regime`/
+`short_technical_weight` continues to behave functionally identically to
+before this addendum (all 64 of `.50`'s own prior tests -- 51 original +
+13 from `.51` -- pass unmodified in behavior, only the new required
+`short_technical_weight` argument was added to each existing call site).
+See `aura_v05352_stock_etf_short_side_signal.py`'s own docstring for the
+full detail of this extension and its reuse-first audit.
 """
 from __future__ import annotations
 
@@ -326,9 +346,11 @@ class CandidateEvidence:
     sentiment_regime: Any | None  # `.47` SentimentRegime instance, duck-typed
     wave_result: Any | None  # `.48` ElliottWaveResearchResult instance, duck-typed
     technical_regime: Any | None  # `.51` TechnicalRegime instance, duck-typed -- added by `.51`, additive only (see module docstring addendum below `.50`'s own docstring, and `.51`'s own docstring)
+    short_technical_regime: Any | None  # `.52` ShortTechnicalRegime instance, duck-typed -- added by `.52`, additive only, mirrors technical_regime exactly (see module docstring addendum and `.52`'s own docstring)
     sentiment_usable: bool
     wave_usable: bool
     technical_usable: bool  # added by `.51`
+    short_technical_usable: bool  # added by `.52`
     news_item_count: int
     sources_present: tuple[str, ...]
     evidence_summary: str
@@ -356,6 +378,8 @@ def _render_evidence_summary(
     wave_usable: bool,
     technical_regime: Any | None = None,
     technical_usable: bool = False,
+    short_technical_regime: Any | None = None,
+    short_technical_usable: bool = False,
 ) -> str:
     """Human/AI-readable evidence text -- becomes `.49` `Candidate.
     evidence_summary` verbatim. Deterministically built from the same
@@ -391,6 +415,16 @@ def _render_evidence_summary(
             parts.append(f"technical: NOT usable (status={getattr(technical_regime, 'status', None)})")
     else:
         parts.append("technical: no data")
+    if short_technical_regime is not None:
+        if short_technical_usable:
+            parts.append(
+                f"short_technical: status={getattr(short_technical_regime, 'status', None)} "
+                f"signal_score={getattr(short_technical_regime, 'signal_score', None)}"
+            )
+        else:
+            parts.append(f"short_technical: NOT usable (status={getattr(short_technical_regime, 'status', None)})")
+    else:
+        parts.append("short_technical: no data")
     parts.append(f"news_item_count={news_item_count}")
     return "; ".join(parts)
 
@@ -401,32 +435,36 @@ def build_candidate_evidence(
     sentiment_regime: Any | None = None,
     wave_result: Any | None = None,
     technical_regime: Any | None = None,
+    short_technical_regime: Any | None = None,
     news_item_count: int = 0,
     now: datetime | None = None,
 ) -> CandidateEvidence:
     """Build `.50`'s structured evidence record for one symbol from
-    `.46`/`.47`/`.48`'s typed outputs, plus `.51`'s `technical_regime`
-    (added by `.51`, additive only -- defaults to `None` so every caller
-    that predates `.51` is unaffected). A source counts as "usable" only
-    when it passes its OWN internal quality bar — `.47`'s
-    `promotable_score is not None` (i.e. `corroboration_status ==
-    SUFFICIENT`), `.48`'s `ambiguity_status == SINGLE_VALID_CANDIDATE`,
-    and `.51`'s `status in {"CONFIRMING", "CONFIRMED"}`
-    — never merely "present". Sources below their own bar are still
-    recorded (visible for audit, flagged by the deterministic critic) but
-    contribute nothing to the base rank score, exactly mirroring `.48`'s
-    own "ambiguity is preserved, never collapsed" discipline one layer up.
+    `.46`/`.47`/`.48`'s typed outputs, plus `.51`'s `technical_regime` and
+    `.52`'s `short_technical_regime` (each added additively -- both
+    default to `None` so every caller that predates `.51`/`.52` is
+    unaffected). A source counts as "usable" only when it passes its OWN
+    internal quality bar — `.47`'s `promotable_score is not None` (i.e.
+    `corroboration_status == SUFFICIENT`), `.48`'s `ambiguity_status ==
+    SINGLE_VALID_CANDIDATE`, `.51`'s and `.52`'s `status in {"CONFIRMING",
+    "CONFIRMED"}` — never merely "present". Sources below their own bar
+    are still recorded (visible for audit, flagged by the deterministic
+    critic) but contribute nothing to the base rank score, exactly
+    mirroring `.48`'s own "ambiguity is preserved, never collapsed"
+    discipline one layer up.
     """
     as_of = _now_iso(now)
     sentiment_usable = sentiment_regime is not None and getattr(sentiment_regime, "promotable_score", None) is not None
     wave_usable = wave_result is not None and getattr(wave_result, "ambiguity_status", None) == "SINGLE_VALID_CANDIDATE"
     technical_usable = technical_regime is not None and getattr(technical_regime, "status", None) in ("CONFIRMING", "CONFIRMED")
+    short_technical_usable = short_technical_regime is not None and getattr(short_technical_regime, "status", None) in ("CONFIRMING", "CONFIRMED")
     sources_present = tuple(
         name
         for name, present in (
             ("SENTIMENT", sentiment_regime is not None),
             ("ELLIOTT_WAVE", wave_result is not None),
             ("TECHNICAL", technical_regime is not None),
+            ("SHORT_TECHNICAL", short_technical_regime is not None),
             ("NEWS", news_item_count > 0),
         )
         if present
@@ -439,6 +477,7 @@ def build_candidate_evidence(
                 "sentiment_as_of": getattr(sentiment_regime, "as_of", None),
                 "wave_as_of": getattr(wave_result, "as_of", None),
                 "technical_as_of": getattr(technical_regime, "as_of", None),
+                "short_technical_as_of": getattr(short_technical_regime, "as_of", None),
                 "news_item_count": news_item_count,
             }
         )
@@ -450,14 +489,17 @@ def build_candidate_evidence(
         sentiment_regime=sentiment_regime,
         wave_result=wave_result,
         technical_regime=technical_regime,
+        short_technical_regime=short_technical_regime,
         sentiment_usable=sentiment_usable,
         wave_usable=wave_usable,
         technical_usable=technical_usable,
+        short_technical_usable=short_technical_usable,
         news_item_count=news_item_count,
         sources_present=sources_present,
         evidence_summary=_render_evidence_summary(
             symbol, sentiment_regime, wave_result, news_item_count, sentiment_usable, wave_usable,
             technical_regime=technical_regime, technical_usable=technical_usable,
+            short_technical_regime=short_technical_regime, short_technical_usable=short_technical_usable,
         ),
     )
 
@@ -468,7 +510,13 @@ def is_shortlist_eligible(evidence: CandidateEvidence) -> bool:
     news presence counts as usable on its own (`.46` has no analogous
     internal quality gate to check against).
     """
-    return evidence.sentiment_usable or evidence.wave_usable or evidence.technical_usable or evidence.news_item_count > 0
+    return (
+        evidence.sentiment_usable
+        or evidence.wave_usable
+        or evidence.technical_usable
+        or evidence.short_technical_usable
+        or evidence.news_item_count > 0
+    )
 
 
 # ============================================================================
@@ -500,6 +548,8 @@ def check_evidence_freshness(
         ages.append((now_dt - _parse_iso(evidence.wave_result.as_of)).total_seconds())
     if evidence.technical_usable:
         ages.append((now_dt - _parse_iso(evidence.technical_regime.as_of)).total_seconds())
+    if evidence.short_technical_usable:
+        ages.append((now_dt - _parse_iso(evidence.short_technical_regime.as_of)).total_seconds())
 
     if not ages:
         # Only raw news (or nothing usable at all -- caught separately by
@@ -547,15 +597,23 @@ def build_shortlist(
 
 
 def compute_base_rank_score(
-    evidence: CandidateEvidence, *, sentiment_weight: float, wave_weight: float, technical_weight: float
+    evidence: CandidateEvidence,
+    *,
+    sentiment_weight: float,
+    wave_weight: float,
+    technical_weight: float,
+    short_technical_weight: float,
 ) -> float:
-    """`technical_weight` was added by `.51` (additive extension to an
-    already-frozen `.50` function -- see `.51`'s module docstring
-    "`.50` integration changes"). It is REQUIRED, no default, matching
-    this project's "never invent numbers" discipline for every other
-    weight/penalty in this module. `.51` is scoped LONG-only this
-    milestone, so the technical term is always ADDED when usable, never
-    subtracted -- there is no bearish/short technical signal today.
+    """`technical_weight` was added by `.51`; `short_technical_weight` was
+    added by `.52` (both additive extensions to an already-frozen `.50`
+    function -- see `.51`'s and `.52`'s module docstrings, "`.50`
+    integration changes"). Both are REQUIRED, no default, matching this
+    project's "never invent numbers" discipline for every other weight/
+    penalty in this module. `.51` is scoped LONG-only, so its technical
+    term is always ADDED when usable, never subtracted; `.52` is scoped
+    SHORT-only, so its term is always SUBTRACTED when usable, never
+    added -- there is no bearish path through `.51`'s term and no
+    bullish path through `.52`'s term.
     """
     if sentiment_weight < 0:
         raise DecisionEngineError("INVALID_SENTIMENT_WEIGHT:must be >= 0")
@@ -563,6 +621,8 @@ def compute_base_rank_score(
         raise DecisionEngineError("INVALID_WAVE_WEIGHT:must be >= 0")
     if technical_weight < 0:
         raise DecisionEngineError("INVALID_TECHNICAL_WEIGHT:must be >= 0")
+    if short_technical_weight < 0:
+        raise DecisionEngineError("INVALID_SHORT_TECHNICAL_WEIGHT:must be >= 0")
 
     score = 0.0
     if evidence.sentiment_usable:
@@ -575,6 +635,8 @@ def compute_base_rank_score(
             score -= wave_weight
     if evidence.technical_usable:
         score += technical_weight * (evidence.technical_regime.signal_score / 100.0)
+    if evidence.short_technical_usable:
+        score -= short_technical_weight * (evidence.short_technical_regime.signal_score / 100.0)
     return score
 
 
@@ -682,6 +744,7 @@ def decide(
     sentiment_weight: float,
     wave_weight: float,
     technical_weight: float,
+    short_technical_weight: float,
     decision_threshold: float,
     ai_penalty_per_concern: float,
     critic_penalty_per_issue: float,
@@ -705,7 +768,11 @@ def decide(
 
     decided_at = _now_iso(now)
     base = compute_base_rank_score(
-        evidence, sentiment_weight=sentiment_weight, wave_weight=wave_weight, technical_weight=technical_weight
+        evidence,
+        sentiment_weight=sentiment_weight,
+        wave_weight=wave_weight,
+        technical_weight=technical_weight,
+        short_technical_weight=short_technical_weight,
     )
     direction = base_score_direction(base)
 

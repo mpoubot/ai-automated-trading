@@ -148,7 +148,7 @@ def proposal_json(candidate_id, thesis="a thesis", confidence=0.9):
 DECIDE_KWARGS = dict(
     sentiment_weight=1.0,
     wave_weight=1.0,
-    technical_weight=0.0,
+    technical_weight=0.0, short_technical_weight=0.0,
     decision_threshold=0.1,
     ai_penalty_per_concern=0.2,
     critic_penalty_per_issue=0.15,
@@ -222,22 +222,22 @@ def test_is_shortlist_eligible_requires_at_least_one_usable_source():
 def test_compute_base_rank_score_requires_nonnegative_weights():
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", sentiment_regime=make_sentiment(), now=NOW)
     with pytest.raises(ENGINE.DecisionEngineError):
-        ENGINE.compute_base_rank_score(ev, sentiment_weight=-1.0, wave_weight=1.0, technical_weight=0.0)
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=-1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     with pytest.raises(ENGINE.DecisionEngineError):
-        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=-1.0, technical_weight=0.0)
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=-1.0, technical_weight=0.0, short_technical_weight=0.0)
 
 
 def test_compute_base_rank_score_sentiment_only():
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", sentiment_regime=make_sentiment(promotable_score=0.5), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=2.0, wave_weight=1.0, technical_weight=0.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=2.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     assert score == pytest.approx(1.0)  # 2.0 * 0.5, wave contributes nothing (absent)
 
 
 def test_compute_base_rank_score_wave_up_is_positive_down_is_negative():
     ev_up = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_single_valid(direction="UP"), now=NOW)
     ev_down = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_single_valid(direction="DOWN"), now=NOW)
-    assert ENGINE.compute_base_rank_score(ev_up, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0) == pytest.approx(1.0)
-    assert ENGINE.compute_base_rank_score(ev_down, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0) == pytest.approx(-1.0)
+    assert ENGINE.compute_base_rank_score(ev_up, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0) == pytest.approx(1.0)
+    assert ENGINE.compute_base_rank_score(ev_down, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0) == pytest.approx(-1.0)
 
 
 def test_compute_base_rank_score_ambiguous_wave_contributes_nothing():
@@ -246,7 +246,7 @@ def test_compute_base_rank_score_ambiguous_wave_contributes_nothing():
     resolved into a directional score contribution.
     """
     ev = ENGINE.build_candidate_evidence("BTC/USDT:USDT", wave_result=make_wave_ambiguous(), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=5.0, technical_weight=0.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=5.0, technical_weight=0.0, short_technical_weight=0.0)
     assert score == 0.0
 
 
@@ -254,7 +254,7 @@ def test_compute_base_rank_score_combines_both_sources():
     ev = ENGINE.build_candidate_evidence(
         "BTC/USDT:USDT", sentiment_regime=make_sentiment(promotable_score=0.4), wave_result=make_wave_single_valid(direction="UP"), now=NOW
     )
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     assert score == pytest.approx(1.4)
 
 
@@ -309,7 +309,7 @@ def test_decide_applies_ai_challenge_penalty_to_final_score():
     decision = ENGINE.decide(ev, llm_client=seq, **DECIDE_KWARGS)
     assert decision.ai_challenge_passed is False
     assert decision.ai_challenge_concern_count == 2
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     expected_after_ai_penalty = base - DECIDE_KWARGS["ai_penalty_per_concern"] * 2
     # deterministic critique should pass cleanly here (sentiment and wave agree, both UP)
     assert decision.final_rank_score == pytest.approx(expected_after_ai_penalty)
@@ -330,7 +330,7 @@ def test_decide_no_ai_penalty_when_challenge_passes_clean():
 
     seq = SequencedClient([proposal_json(ev.candidate_id), json.dumps({"concerns": []})])
     decision = ENGINE.decide(ev, llm_client=seq, **DECIDE_KWARGS)
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     assert decision.final_rank_score == pytest.approx(base)
 
 
@@ -388,7 +388,7 @@ def test_critic_has_no_llm_client_parameter():
 
 def test_ai_confidence_never_added_to_score_even_when_very_confident():
     ev = _ev_bullish()
-    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
+    base = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
     high_conf_client = FakeLLMClient(proposal_json(ev.candidate_id, confidence=0.99))
     decision = ENGINE.decide(ev, llm_client=high_conf_client, **DECIDE_KWARGS)
     assert decision.ai_stated_confidence == 0.99
@@ -792,18 +792,18 @@ def test_is_shortlist_eligible_via_technical_alone():
 def test_compute_base_rank_score_rejects_negative_technical_weight():
     ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(), now=NOW)
     with pytest.raises(ENGINE.DecisionEngineError):
-        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=-0.1)
+        ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=-0.1, short_technical_weight=0.0)
 
 
 def test_compute_base_rank_score_technical_term_is_additive_and_normalized():
     ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="CONFIRMED", signal_score=80.0), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0, short_technical_weight=0.0)
     assert score == pytest.approx(2.0 * (80.0 / 100.0))
 
 
 def test_compute_base_rank_score_technical_term_zero_when_not_usable():
     ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=_FakeTechnicalRegime(status="FAILED", signal_score=80.0), now=NOW)
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0, short_technical_weight=0.0)
     assert score == pytest.approx(0.0)
 
 
@@ -819,8 +819,8 @@ def test_compute_base_rank_score_technical_never_subtracts():
         technical_regime=_FakeTechnicalRegime(status="CONFIRMED", signal_score=100.0),
         now=NOW,
     )
-    score_without_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0)
-    score_with_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=1.0)
+    score_without_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
+    score_with_technical = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=1.0, short_technical_weight=0.0)
     assert score_with_technical > score_without_technical
 
 

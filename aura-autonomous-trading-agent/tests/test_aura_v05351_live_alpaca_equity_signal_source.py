@@ -468,7 +468,7 @@ def test_technical_regime_score_flows_into_50_base_rank_score():
     bars = _make_bars(80, pattern=PATTERN_MILD_BULLISH, volume_spike_last=True)
     regime = M.build_technical_regime_from_bars("AAPL", bars, params=TEST_PARAMS, universe_version="v1", now=bars.index[-1] + timedelta(hours=1))
     ev = ENGINE.build_candidate_evidence("AAPL", technical_regime=regime, now=bars.index[-1] + timedelta(hours=1))
-    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0)
+    score = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=2.0, short_technical_weight=0.0)
     assert score == pytest.approx(2.0 * (regime.signal_score / 100.0))
     assert score > 0  # LONG-only: a usable technical regime never produces a negative contribution
 
