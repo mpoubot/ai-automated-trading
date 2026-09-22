@@ -29,3 +29,22 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+aura-autonomous-trading-agent/calibration_output/
+*.zip
+*.bundle
+# MEXC generated research data
+mexc_bot/data/
+mexc_bot/baseline_results/
+mexc_bot/diagnostic_results/
+mexc_bot/directional_decomposition_results/
+
+# Generated calibration output
+aura-autonomous-trading-agent/calibration_output/
+
+# Generated reports / local research output
+Claude outputs/
+reports/
+
+# Large generated archives
+*.zip
+*.bundle
