@@ -1,0 +1,11 @@
+# Dark theme for aura_v05358_dashboard.py, matching this repo's dataviz
+# skill palette (references/palette.md, dark column). Streamlit applies
+# this automatically to its own built-in widgets (sidebar, inputs,
+# dataframes) so they match the dashboard's custom CSS cards.
+[theme]
+base = "dark"
+primaryColor = "#3987e5"
+backgroundColor = "#0d0d0d"
+secondaryBackgroundColor = "#1a1a19"
+textColor = "#ffffff"
+font = "sans serif"
