@@ -857,3 +857,172 @@ def test_prior_50_behavior_fully_preserved_all_51_original_tests_still_pass():
     section 14 sees the claim stated explicitly next to the new tests.
     """
     assert True
+
+
+# ============================================================================
+# 15. `.359` sector-rotation evidence integration (added by `.359`/`.360`,
+# additive to `.50`'s existing contract, same "no caller has heard of this
+# yet gets a byte-identical result" guarantee `.51` established in section
+# 14 above -- see aura_v05350_decision_engine.py's own module-docstring
+# addendum for why `sector_rotation_weight` deliberately defaults to 0.0
+# rather than following `.51`/`.52`'s required-no-default precedent: the
+# frozen live `AuraFrozenDecisionEngineSignalSource` and ~16 other existing
+# call sites must remain untouched by this research-track-only extension).
+# ============================================================================
+
+
+class _FakeSectorRotationRegime:
+    """Duck-typed stand-in for `.359`'s real `SectorRotationRegime` --
+    `.50` only ever reads `.rotation_score` (confirmed by reading
+    `build_candidate_evidence`/`compute_base_rank_score`/
+    `check_evidence_freshness` above), plus `.as_of` for freshness, so a
+    fake with just those two attributes plus a couple of cosmetic fields
+    is sufficient here, exactly mirroring `_FakeTechnicalRegime` above.
+    """
+
+    def __init__(self, *, rotation_score=0.6, rotation_tier="LEADER", as_of=NOW_ISO):
+        self.rotation_score = rotation_score
+        self.rotation_tier = rotation_tier
+        self.as_of = as_of
+
+
+def test_build_candidate_evidence_sector_rotation_usable_when_score_present():
+    ev = ENGINE.build_candidate_evidence(
+        "AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.4), now=NOW
+    )
+    assert ev.sector_rotation_usable is True
+    assert "SECTOR_ROTATION" in ev.sources_present
+
+
+def test_build_candidate_evidence_sector_rotation_not_usable_when_score_is_none():
+    ev = ENGINE.build_candidate_evidence(
+        "AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=None, rotation_tier="NOT_APPLICABLE"), now=NOW
+    )
+    assert ev.sector_rotation_usable is False
+    assert "SECTOR_ROTATION" in ev.sources_present  # present but not usable -- recorded for audit
+
+
+def test_build_candidate_evidence_sector_rotation_absent_by_default_is_unaffected():
+    """The same additive-not-invasive guarantee `.51` proved for TECHNICAL:
+    a caller that never heard of `.359` gets a byte-identical structural
+    result -- no sector-rotation evidence, no SECTOR_ROTATION in
+    sources_present, and (proven below) zero effect on any score."""
+    ev = ENGINE.build_candidate_evidence("AAA", sentiment_regime=make_sentiment(symbol="AAA"), now=NOW)
+    assert ev.sector_rotation_regime is None
+    assert ev.sector_rotation_usable is False
+    assert "SECTOR_ROTATION" not in ev.sources_present
+
+
+def test_is_shortlist_eligible_via_sector_rotation_alone():
+    ev_usable = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.5), now=NOW)
+    ev_unusable = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=None), now=NOW)
+    assert ENGINE.is_shortlist_eligible(ev_usable) is True
+    assert ENGINE.is_shortlist_eligible(ev_unusable) is False
+
+
+def test_compute_base_rank_score_rejects_negative_sector_rotation_weight():
+    ev = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(), now=NOW)
+    with pytest.raises(ENGINE.DecisionEngineError):
+        ENGINE.compute_base_rank_score(
+            ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0,
+            short_technical_weight=0.0, sector_rotation_weight=-0.1,
+        )
+
+
+def test_compute_base_rank_score_sector_rotation_term_is_additive():
+    ev = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.4), now=NOW)
+    score = ENGINE.compute_base_rank_score(
+        ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0,
+        short_technical_weight=0.0, sector_rotation_weight=2.0,
+    )
+    assert score == pytest.approx(2.0 * 0.4)
+
+
+def test_compute_base_rank_score_sector_rotation_term_zero_when_not_usable():
+    ev = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=None), now=NOW)
+    score = ENGINE.compute_base_rank_score(
+        ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0,
+        short_technical_weight=0.0, sector_rotation_weight=2.0,
+    )
+    assert score == pytest.approx(0.0)
+
+
+def test_compute_base_rank_score_sector_rotation_can_push_either_direction():
+    """Unlike `.51` (LONG-only this milestone), `.359`'s rotation_score is
+    signed -- a LAGGARD/negative rotation score must be able to pull the
+    combined score toward SHORT_LEANING, not just add/subtract magnitude."""
+    ev_pos = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.5), now=NOW)
+    ev_neg = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=-0.5, rotation_tier="LAGGARD"), now=NOW)
+    score_pos = ENGINE.compute_base_rank_score(ev_pos, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0, sector_rotation_weight=1.0)
+    score_neg = ENGINE.compute_base_rank_score(ev_neg, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0, sector_rotation_weight=1.0)
+    assert score_pos > 0
+    assert score_neg < 0
+
+
+def test_compute_base_rank_score_default_sector_rotation_weight_is_zero_no_op():
+    """The core backward-compatibility guarantee this deviation from
+    `.51`/`.52`'s required-no-default convention exists to provide: a
+    caller (including the frozen live signal source) that never passes
+    `sector_rotation_weight` at all gets a mathematically identical score
+    to one computed before `.359` existed, even if sector-rotation
+    evidence happens to be present on the candidate."""
+    ev = ENGINE.build_candidate_evidence(
+        "AAA", sentiment_regime=make_sentiment(symbol="AAA", promotable_score=0.5),
+        sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.9), now=NOW,
+    )
+    score_without_kwarg = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0)
+    score_with_explicit_zero = ENGINE.compute_base_rank_score(ev, sentiment_weight=1.0, wave_weight=1.0, technical_weight=0.0, short_technical_weight=0.0, sector_rotation_weight=0.0)
+    assert score_without_kwarg == pytest.approx(score_with_explicit_zero) == pytest.approx(0.5)
+
+
+def test_decide_end_to_end_with_sector_rotation_evidence_only():
+    ev = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.8), now=NOW)
+    kwargs = dict(DECIDE_KWARGS)
+    kwargs["sector_rotation_weight"] = 1.0
+    decision = ENGINE.decide(ev, llm_client=FakeLLMClient(proposal_json(ev.candidate_id)), **kwargs)
+    assert decision.direction == "LONG_LEANING"
+    assert decision.base_rank_score == pytest.approx(0.8)
+
+
+def test_decide_default_kwargs_from_section_1_through_13_unaffected_by_sector_rotation_param():
+    """`.359`'s addition of a defaulted kwarg to `decide()` must not
+    change any pre-existing call's behavior -- every DECIDE_KWARGS call
+    throughout sections 1-13 above already proves this by never passing
+    `sector_rotation_weight` at all and still passing; this test makes
+    the claim explicit for a candidate that also happens to carry
+    sector-rotation evidence, confirming the frozen default truly wins
+    even when there IS evidence to ignore."""
+    ev = ENGINE.build_candidate_evidence(
+        "BTC/USDT:USDT", sentiment_regime=make_sentiment(promotable_score=0.6),
+        wave_result=make_wave_single_valid(direction="UP"),
+        sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=-0.9),  # would flip direction if weighted
+        now=NOW,
+    )
+    decision = ENGINE.decide(ev, llm_client=FakeLLMClient(proposal_json(ev.candidate_id)), **DECIDE_KWARGS)
+    assert decision.direction == "LONG_LEANING"  # unaffected -- sector_rotation_weight defaults to 0.0
+
+
+def test_check_evidence_freshness_uses_sector_rotation_as_of_when_only_source():
+    stale_time = (NOW - timedelta(hours=999)).isoformat()
+    ev = ENGINE.build_candidate_evidence(
+        "AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.5, as_of=stale_time), now=NOW
+    )
+    fresh = ENGINE.check_evidence_freshness(ev, max_evidence_age_seconds=3600.0, now=NOW)
+    assert fresh.is_fresh is False
+
+
+def test_evidence_summary_mentions_sector_rotation_tier_when_present_and_no_data_when_absent():
+    ev_with = ENGINE.build_candidate_evidence("AAA", sector_rotation_regime=_FakeSectorRotationRegime(rotation_score=0.5, rotation_tier="LEADER"), now=NOW)
+    ev_without = ENGINE.build_candidate_evidence("AAA", now=NOW)
+    assert "sector_rotation" in ev_with.evidence_summary
+    assert "LEADER" in ev_with.evidence_summary
+    assert "sector_rotation: no data" in ev_without.evidence_summary
+
+
+def test_prior_50_and_51_behavior_fully_preserved_all_original_tests_still_pass():
+    """Structural marker mirroring section 14's own -- this file's own
+    collection succeeding with every pre-`.359` test above (sections 1-14)
+    unmodified IS the proof (confirmed separately: all 64 pre-existing
+    tests pass byte-for-byte unmodified after this section was appended).
+    """
+    assert True

@@ -240,6 +240,40 @@ before this addendum (all 64 of `.50`'s own prior tests -- 51 original +
 `short_technical_weight` argument was added to each existing call site).
 See `aura_v05352_stock_etf_short_side_signal.py`'s own docstring for the
 full detail of this extension and its reuse-first audit.
+
+Addendum (`.359`, 2026-09-24) -- third small additive extension, DEFAULT-
+NEUTRAL rather than required
+------------------------------------------------------------------------
+`.359` ("Sector rotation regime engine") added a FIFTH, independent
+evidence dimension: `sector_rotation_regime` (a `.359`
+`SectorRotationRegime` instance, duck-typed exactly like the other four).
+`CandidateEvidence` gained `sector_rotation_regime`/
+`sector_rotation_usable` fields, `build_candidate_evidence` gained one
+new optional (default `None`) parameter, exactly mirroring `.51`/`.52`.
+
+DELIBERATE DEVIATION from `.51`/`.52`'s own precedent: `.51`/`.52` each
+made their new weight parameter REQUIRED (no default), matching this
+module's "never invent numbers" convention. `sector_rotation_weight`
+instead defaults to `0.0`. This is intentional, not an inconsistency:
+`.359` was built as part of Martin's 2026-09-24 authorization to wire
+news/sentiment/Elliott-Wave/sector-rotation into the RESEARCH-track
+evidence model (see `aura_v05360_research_full_evidence_builder.py`),
+explicitly WITHOUT touching the already-approved, currently-frozen live
+Stage 3 chain (`.356`/`.357`) or `aura_v054_signal_source.py`'s frozen
+`AuraFrozenDecisionEngineSignalSource`, pending this new evidence
+clearing the Strategy Registry (`.339`) evidence gate. Making
+`sector_rotation_weight` required would force every one of dozens of
+existing call sites -- including that already-tested, frozen, live-
+wired class -- to be touched for a capability none of them use yet,
+which is exactly the collateral-change risk this deviation avoids.
+`sector_rotation_weight=0.0` plus `sector_rotation_regime=None` is a
+true mathematical no-op (the same as any other candidate this module
+already handles with no sector-rotation evidence at all), so every
+caller written before this addendum is provably unaffected -- confirmed
+by every one of `.350`'s prior tests continuing to pass unmodified. A
+caller that wants to actually use this evidence dimension must supply
+both a real `sector_rotation_regime` AND a nonzero `sector_rotation_
+weight` explicitly.
 """
 from __future__ import annotations
 
@@ -347,10 +381,12 @@ class CandidateEvidence:
     wave_result: Any | None  # `.48` ElliottWaveResearchResult instance, duck-typed
     technical_regime: Any | None  # `.51` TechnicalRegime instance, duck-typed -- added by `.51`, additive only (see module docstring addendum below `.50`'s own docstring, and `.51`'s own docstring)
     short_technical_regime: Any | None  # `.52` ShortTechnicalRegime instance, duck-typed -- added by `.52`, additive only, mirrors technical_regime exactly (see module docstring addendum and `.52`'s own docstring)
+    sector_rotation_regime: Any | None  # `.359` SectorRotationRegime instance, duck-typed -- added by `.359`, additive/default-neutral (see module docstring addendum and `.359`'s own docstring)
     sentiment_usable: bool
     wave_usable: bool
     technical_usable: bool  # added by `.51`
     short_technical_usable: bool  # added by `.52`
+    sector_rotation_usable: bool  # added by `.359`
     news_item_count: int
     sources_present: tuple[str, ...]
     evidence_summary: str
@@ -380,6 +416,8 @@ def _render_evidence_summary(
     technical_usable: bool = False,
     short_technical_regime: Any | None = None,
     short_technical_usable: bool = False,
+    sector_rotation_regime: Any | None = None,
+    sector_rotation_usable: bool = False,
 ) -> str:
     """Human/AI-readable evidence text -- becomes `.49` `Candidate.
     evidence_summary` verbatim. Deterministically built from the same
@@ -425,6 +463,16 @@ def _render_evidence_summary(
             parts.append(f"short_technical: NOT usable (status={getattr(short_technical_regime, 'status', None)})")
     else:
         parts.append("short_technical: no data")
+    if sector_rotation_regime is not None:
+        if sector_rotation_usable:
+            parts.append(
+                f"sector_rotation: tier={getattr(sector_rotation_regime, 'rotation_tier', None)} "
+                f"score={getattr(sector_rotation_regime, 'rotation_score', None)}"
+            )
+        else:
+            parts.append(f"sector_rotation: NOT usable (tier={getattr(sector_rotation_regime, 'rotation_tier', None)})")
+    else:
+        parts.append("sector_rotation: no data")
     parts.append(f"news_item_count={news_item_count}")
     return "; ".join(parts)
 
@@ -436,6 +484,7 @@ def build_candidate_evidence(
     wave_result: Any | None = None,
     technical_regime: Any | None = None,
     short_technical_regime: Any | None = None,
+    sector_rotation_regime: Any | None = None,
     news_item_count: int = 0,
     now: datetime | None = None,
 ) -> CandidateEvidence:
@@ -458,6 +507,7 @@ def build_candidate_evidence(
     wave_usable = wave_result is not None and getattr(wave_result, "ambiguity_status", None) == "SINGLE_VALID_CANDIDATE"
     technical_usable = technical_regime is not None and getattr(technical_regime, "status", None) in ("CONFIRMING", "CONFIRMED")
     short_technical_usable = short_technical_regime is not None and getattr(short_technical_regime, "status", None) in ("CONFIRMING", "CONFIRMED")
+    sector_rotation_usable = sector_rotation_regime is not None and getattr(sector_rotation_regime, "rotation_score", None) is not None
     sources_present = tuple(
         name
         for name, present in (
@@ -465,6 +515,7 @@ def build_candidate_evidence(
             ("ELLIOTT_WAVE", wave_result is not None),
             ("TECHNICAL", technical_regime is not None),
             ("SHORT_TECHNICAL", short_technical_regime is not None),
+            ("SECTOR_ROTATION", sector_rotation_regime is not None),
             ("NEWS", news_item_count > 0),
         )
         if present
@@ -478,6 +529,7 @@ def build_candidate_evidence(
                 "wave_as_of": getattr(wave_result, "as_of", None),
                 "technical_as_of": getattr(technical_regime, "as_of", None),
                 "short_technical_as_of": getattr(short_technical_regime, "as_of", None),
+                "sector_rotation_as_of": getattr(sector_rotation_regime, "as_of", None),
                 "news_item_count": news_item_count,
             }
         )
@@ -490,16 +542,19 @@ def build_candidate_evidence(
         wave_result=wave_result,
         technical_regime=technical_regime,
         short_technical_regime=short_technical_regime,
+        sector_rotation_regime=sector_rotation_regime,
         sentiment_usable=sentiment_usable,
         wave_usable=wave_usable,
         technical_usable=technical_usable,
         short_technical_usable=short_technical_usable,
+        sector_rotation_usable=sector_rotation_usable,
         news_item_count=news_item_count,
         sources_present=sources_present,
         evidence_summary=_render_evidence_summary(
             symbol, sentiment_regime, wave_result, news_item_count, sentiment_usable, wave_usable,
             technical_regime=technical_regime, technical_usable=technical_usable,
             short_technical_regime=short_technical_regime, short_technical_usable=short_technical_usable,
+            sector_rotation_regime=sector_rotation_regime, sector_rotation_usable=sector_rotation_usable,
         ),
     )
 
@@ -515,6 +570,7 @@ def is_shortlist_eligible(evidence: CandidateEvidence) -> bool:
         or evidence.wave_usable
         or evidence.technical_usable
         or evidence.short_technical_usable
+        or evidence.sector_rotation_usable
         or evidence.news_item_count > 0
     )
 
@@ -550,6 +606,8 @@ def check_evidence_freshness(
         ages.append((now_dt - _parse_iso(evidence.technical_regime.as_of)).total_seconds())
     if evidence.short_technical_usable:
         ages.append((now_dt - _parse_iso(evidence.short_technical_regime.as_of)).total_seconds())
+    if evidence.sector_rotation_usable:
+        ages.append((now_dt - _parse_iso(evidence.sector_rotation_regime.as_of)).total_seconds())
 
     if not ages:
         # Only raw news (or nothing usable at all -- caught separately by
@@ -603,6 +661,7 @@ def compute_base_rank_score(
     wave_weight: float,
     technical_weight: float,
     short_technical_weight: float,
+    sector_rotation_weight: float = 0.0,
 ) -> float:
     """`technical_weight` was added by `.51`; `short_technical_weight` was
     added by `.52` (both additive extensions to an already-frozen `.50`
@@ -614,6 +673,15 @@ def compute_base_rank_score(
     SHORT-only, so its term is always SUBTRACTED when usable, never
     added -- there is no bearish path through `.51`'s term and no
     bullish path through `.52`'s term.
+
+    `sector_rotation_weight` was added by `.359` and DELIBERATELY defaults
+    to `0.0` rather than being required -- see `.350`'s own module
+    docstring, "Addendum (`.359`...)", for why this one weight breaks
+    from the required-no-default convention. `.359`'s `rotation_score` is
+    already signed in [-1, 1] (positive for a rotation leader/favored
+    haven, negative for a laggard), so this term is always ADDED when
+    usable, exactly like `sentiment_weight`'s term -- the sign lives in
+    the evidence, not in this function.
     """
     if sentiment_weight < 0:
         raise DecisionEngineError("INVALID_SENTIMENT_WEIGHT:must be >= 0")
@@ -623,6 +691,8 @@ def compute_base_rank_score(
         raise DecisionEngineError("INVALID_TECHNICAL_WEIGHT:must be >= 0")
     if short_technical_weight < 0:
         raise DecisionEngineError("INVALID_SHORT_TECHNICAL_WEIGHT:must be >= 0")
+    if sector_rotation_weight < 0:
+        raise DecisionEngineError("INVALID_SECTOR_ROTATION_WEIGHT:must be >= 0")
 
     score = 0.0
     if evidence.sentiment_usable:
@@ -637,6 +707,8 @@ def compute_base_rank_score(
         score += technical_weight * (evidence.technical_regime.signal_score / 100.0)
     if evidence.short_technical_usable:
         score -= short_technical_weight * (evidence.short_technical_regime.signal_score / 100.0)
+    if evidence.sector_rotation_usable:
+        score += sector_rotation_weight * evidence.sector_rotation_regime.rotation_score
     return score
 
 
@@ -750,6 +822,7 @@ def decide(
     critic_penalty_per_issue: float,
     proposal_module: Any,
     llm_client: Any,
+    sector_rotation_weight: float = 0.0,
     now: datetime | None = None,
 ) -> TradingDecision:
     """The top-level orchestration function: candidate evidence -> base
@@ -773,6 +846,7 @@ def decide(
         wave_weight=wave_weight,
         technical_weight=technical_weight,
         short_technical_weight=short_technical_weight,
+        sector_rotation_weight=sector_rotation_weight,
     )
     direction = base_score_direction(base)
 
