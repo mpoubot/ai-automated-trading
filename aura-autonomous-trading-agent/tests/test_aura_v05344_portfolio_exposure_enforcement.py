@@ -104,6 +104,7 @@ def test_clean_portfolio_within_all_configured_limits_allows():
         max_portfolio_heat_ratio=0.5, max_asset_concentration_ratio=0.9, max_net_exposure_ratio=0.9,
         max_leverage_ratio_by_venue={"MEXC": 1.0, "ALPACA": 1.0}, mexc_leverage_cap=10.0,
         max_daily_loss_pct_by_venue={"MEXC": 0.1, "ALPACA": 0.1}, max_drawdown_pct_by_venue={"MEXC": 0.3, "ALPACA": 0.3},
+        correlated_groups={"majors": ("MEXC:BTC_USDT",)}, max_correlation_group_concentration_ratio=0.9,
     )
     decision = _evaluate(snap, limits)
     assert decision.overall_verdict == "ALLOW"
@@ -446,3 +447,174 @@ def test_module_never_places_or_modifies_orders_or_positions():
     forbidden = ["place_order(", "submit_order(", "cancel_order(", "authorized_submit(", "authorized_order_request("]
     for token in forbidden:
         assert token not in code_only, f"enforcement module must not reference {token!r}"
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — 2026-09-24 Lablab-audit extension: correlation-group
+# concentration (item 9, optionwright / Alpacaruns). See .44's module
+# docstring addendum for full provenance/rationale.
+# ---------------------------------------------------------------------------
+
+def _group_verdicts(decision, group=None):
+    verdicts = [v for v in decision.dimension_verdicts if v.dimension == "correlation_group_concentration"]
+    if group is None:
+        return verdicts
+    return [v for v in verdicts if v.evidence.get("group") == group]
+
+
+def test_correlation_group_no_groups_configured_reports_single_limit_not_configured():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    limits = ENF.PortfolioLimits()  # no correlated_groups at all
+    decision = _evaluate(snap, limits)
+    verdicts = _group_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "LIMIT_NOT_CONFIGURED"
+    assert verdicts[0].reason == "NO_GROUPS_CONFIGURED"
+
+
+def test_correlation_group_configured_without_ratio_is_limit_not_configured_per_group():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=4000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=2))
+    limits = ENF.PortfolioLimits(correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")})  # no ratio set
+    decision = _evaluate(snap, limits)
+    verdicts = _group_verdicts(decision, "majors")
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "LIMIT_NOT_CONFIGURED"
+    assert verdicts[0].reason == "NO_LIMIT_CONFIGURED"
+
+
+def test_correlation_group_breach_blocks_even_though_no_single_symbol_breaches():
+    """Neither BTC nor ETH alone exceeds a 50% single-symbol cap (each is
+    40%), but held together they are 80% of the book -- exactly the gap
+    audit item 9 exists to close."""
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=4000.0),
+                 _pos(venue="MEXC", symbol="SOL_USDT", notional=2000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=3))
+    limits = ENF.PortfolioLimits(
+        max_asset_concentration_ratio=0.5,  # each symbol individually passes this
+        correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")},
+        max_correlation_group_concentration_ratio=0.5,
+    )
+    decision = _evaluate(snap, limits)
+    single_symbol = next(v for v in decision.dimension_verdicts if v.dimension == "asset_concentration")
+    assert single_symbol.verdict == "PASS"
+    group = _group_verdicts(decision, "majors")[0]
+    assert group.verdict == "BLOCK" and group.reason == "LIMIT_BREACHED"
+    assert group.evidence["group_share"] == 0.8
+    assert decision.overall_verdict == "BLOCK"
+
+
+def test_correlation_group_within_limit_passes():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=4000.0),
+                 _pos(venue="MEXC", symbol="SOL_USDT", notional=2000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=3))
+    limits = ENF.PortfolioLimits(correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")},
+                                  max_correlation_group_concentration_ratio=0.9)
+    decision = _evaluate(snap, limits)
+    group = _group_verdicts(decision, "majors")[0]
+    assert group.verdict == "PASS" and group.reason == "WITHIN_LIMIT"
+    assert decision.overall_verdict == "ALLOW"
+
+
+def test_correlation_group_member_not_held_treated_as_zero_share_not_error():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=3000.0), _pos(venue="MEXC", symbol="SOL_USDT", notional=7000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=2))
+    limits = ENF.PortfolioLimits(correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:XRP_USDT")},  # XRP not held at all
+                                  max_correlation_group_concentration_ratio=0.9)
+    decision = _evaluate(snap, limits)
+    group = _group_verdicts(decision, "majors")[0]
+    assert group.verdict == "PASS"
+    assert group.evidence["group_share"] == 0.3
+    assert group.evidence["members"]["MEXC:XRP_USDT"] == 0.0
+
+
+def test_correlation_group_multiple_groups_all_independently_reported():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=4000.0),
+                 _pos(venue="MEXC", symbol="SOL_USDT", notional=2000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=3))
+    limits = ENF.PortfolioLimits(
+        correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT"), "alts": ("MEXC:SOL_USDT",)},
+        max_correlation_group_concentration_ratio=0.3,
+    )
+    decision = _evaluate(snap, limits)
+    verdicts = _group_verdicts(decision)
+    assert len(verdicts) == 2
+    majors = next(v for v in verdicts if v.evidence["group"] == "majors")
+    alts = next(v for v in verdicts if v.evidence["group"] == "alts")
+    assert majors.verdict == "BLOCK"   # 0.8 > 0.3
+    assert alts.verdict == "PASS"      # 0.2 <= 0.3
+
+
+def test_correlation_group_failed_venue_blocks_as_data_quality_not_a_breach():
+    """A failed venue blocks the WHOLE dimension as one verdict (data
+    quality, not a per-group breach) -- same shape as asset_concentration's
+    own aggregate data-quality block, which isn't per-symbol either."""
+    positions = [_pos(venue="ALPACA", symbol="SPY", notional=500.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", status="FAILED", equity=None, error="down"))
+    limits = ENF.PortfolioLimits(correlated_groups={"g": ("ALPACA:SPY",)}, max_correlation_group_concentration_ratio=0.99)
+    decision = _evaluate(snap, limits)
+    verdicts = _group_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "BLOCK" and verdicts[0].reason == "VENUE_DATA_INCOMPLETE"
+
+
+def test_correlation_group_flat_book_is_pass_not_block():
+    snap = _snapshot([], mexc_status=_status("MEXC", equity=10000.0, positions_count=0))
+    limits = ENF.PortfolioLimits(correlated_groups={"g": ("MEXC:BTC_USDT",)}, max_correlation_group_concentration_ratio=0.5)
+    decision = _evaluate(snap, limits)
+    group = _group_verdicts(decision, "g")[0]
+    assert group.verdict == "PASS"
+    assert group.evidence["group_share"] == 0.0
+
+
+def test_correlation_group_unpriced_position_blocks_as_not_computable():
+    unpriced = OBS.PositionRecord(venue="MEXC", symbol="XRP_USDT", direction="LONG", quantity=1.0, entry_price=1.0,
+                                   leverage=None, mark_price=None, notional_usd=None, notional_basis=None,
+                                   unrealized_pnl_usd=None, liquidation_price=None, raw_source_id=None, as_of=AS_OF)
+    snap = _snapshot([unpriced], mexc_status=_status("MEXC", equity=4000.0, positions_count=1))
+    limits = ENF.PortfolioLimits(correlated_groups={"g": ("MEXC:XRP_USDT",)}, max_correlation_group_concentration_ratio=0.5)
+    decision = _evaluate(snap, limits)
+    verdicts = _group_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "BLOCK" and verdicts[0].reason == "EXPOSURE_NOT_COMPUTABLE"
+
+
+def test_correlation_group_evaluated_in_hypothetical_trade_as_current_state_only():
+    """Matches asset_concentration's own documented behavior: current-state
+    only, unaffected by the hypothetical order under evaluation."""
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=8000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=2000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=2))
+    limits = ENF.PortfolioLimits(correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")},
+                                  max_correlation_group_concentration_ratio=0.5)
+    hypothetical = _pos(venue="ALPACA", symbol="SPY", notional=100.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, limits, max_snapshot_age_seconds=300, now=NOW)
+    group = _group_verdicts(decision, "majors")[0]
+    assert group.verdict == "BLOCK"  # pre-existing 100% concentration in majors, untouched by the unrelated hypothetical
+    assert group.evidence["group_share"] == 1.0
+
+
+def test_correlation_group_participates_in_decision_hash():
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="SOL_USDT", notional=6000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=2))
+    d1 = _evaluate(snap, ENF.PortfolioLimits(correlated_groups={"g": ("MEXC:BTC_USDT",)}, max_correlation_group_concentration_ratio=0.9))
+    d2 = _evaluate(snap, ENF.PortfolioLimits(correlated_groups={"g": ("MEXC:BTC_USDT",)}, max_correlation_group_concentration_ratio=0.1))
+    assert d1.decision_hash != d2.decision_hash
+    assert d1.overall_verdict == "ALLOW" and d2.overall_verdict == "BLOCK"
+
+
+def test_pre_existing_behavior_unaffected_when_no_correlated_groups_configured():
+    """Backward-compatibility proof, same shape as .350's own
+    default-weight-is-zero-no-op proof: a caller that never learns
+    correlated_groups exists gets the exact same overall_verdict on every
+    OTHER dimension as before this extension -- the new dimension only
+    ever adds a LIMIT_NOT_CONFIGURED placeholder verdict, never changes
+    an existing one."""
+    positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=9000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=1000.0)]
+    snap = _snapshot(positions, mexc_status=_status("MEXC", equity=4000.0, positions_count=2))
+    limits = ENF.PortfolioLimits(max_asset_concentration_ratio=0.5)  # correlated_groups untouched (default)
+    decision = _evaluate(snap, limits)
+    assert decision.overall_verdict == "BLOCK"
+    non_group_verdicts = [v for v in decision.dimension_verdicts if v.dimension != "correlation_group_concentration"]
+    asset_conc = next(v for v in non_group_verdicts if v.dimension == "asset_concentration")
+    assert asset_conc.verdict == "BLOCK" and asset_conc.reason == "LIMIT_BREACHED"

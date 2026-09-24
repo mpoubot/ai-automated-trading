@@ -160,6 +160,43 @@ to make every judgment call auditable)
     distinguished from "positions exist but could not be priced"
     (`positions_excluded_no_notional > 0`), which DOES BLOCK — that is a
     real "cannot prove safe" situation, not an empty book.
+
+Extension — 2026-09-24, Lablab hackathon competitor audit
+------------------------------------------------------------------------
+Per Martin's explicit rule-relaxation ("same as DELTAX" — direct porting/
+adaptation of hackathon competitor patterns permitted, with disclosed
+provenance per module, same discipline as `.359`), and after Martin asked
+for a broadened, not narrower, hardening pass on this module:
+
+  - `correlated_groups` / `max_correlation_group_concentration_ratio` on
+    `PortfolioLimits`, and the new `correlation_group_concentration`
+    dimension below. Concept adapted from two independently-converging
+    hackathon implementations found in the 2026-09-24 26-repo audit —
+    optionwright's `PolicyState.open_positions_group` and Alpacaruns'
+    `strategy/ensemble/riskbudget.go` (concept only, not code; both
+    VALIDATED with passing test suites in the audit). The existing
+    `asset_concentration` dimension already caps any SINGLE symbol's share
+    of the book; it has no way to see that several symbols held together
+    (e.g. SPY+QQQ+IWM) are effectively one directional bet. This extension
+    closes exactly that gap, using the same "never invent a limit" shape
+    as every other dimension here: `correlated_groups` defaults to an
+    empty dict (no groups known), `max_correlation_group_concentration_ratio`
+    defaults to `None` (no cap chosen) — until Martin explicitly supplies
+    both, the new dimension reports `LIMIT_NOT_CONFIGURED`, never a guess,
+    and every pre-existing caller (including one that never learns this
+    field exists) gets a byte-identical decision on every other dimension.
+  - A companion, deliberately separate module,
+    `aura_v05361_portfolio_enforcement_journal.py`, persists every
+    `EnforcementDecision` this module produces (ALLOW and BLOCK alike,
+    including flat/no-trade cycles) as a durable, append-only record.
+    Concept adapted from EdgeStack's `agent/journal.py` (concept only, not
+    code; VALIDATED in the audit) — "every session, including no-trade
+    days, records the full gate trail, not just executed trades." Kept
+    out of THIS file deliberately: `.44` remains a pure function of its
+    inputs (no I/O, no side effects, matching every dimension check
+    above); persistence is a separate, explicit wiring step, the same way
+    wiring `.44`'s decision into `.31`/`.36`'s authorization chain was
+    left to a later step rather than folded into this module's own scope.
 """
 from __future__ import annotations
 
@@ -239,6 +276,14 @@ class PortfolioLimits:
     mexc_leverage_cap: float | None = None
     max_daily_loss_pct_by_venue: dict[str, float] = field(default_factory=dict)
     max_drawdown_pct_by_venue: dict[str, float] = field(default_factory=dict)
+    # 2026-09-24 Lablab-audit extension (see module docstring addendum).
+    # Keys are caller-chosen group names; values are tuples of "VENUE:SYMBOL"
+    # strings matching .43's own asset_concentration `by_symbol` key shape
+    # (e.g. {"broad_market_etfs": ("ALPACA:SPY", "ALPACA:QQQ", "ALPACA:IWM")}).
+    # Empty dict = no groups known = the new dimension reports
+    # LIMIT_NOT_CONFIGURED, never a guess.
+    correlated_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    max_correlation_group_concentration_ratio: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -249,6 +294,8 @@ class PortfolioLimits:
             "mexc_leverage_cap": self.mexc_leverage_cap,
             "max_daily_loss_pct_by_venue": dict(self.max_daily_loss_pct_by_venue),
             "max_drawdown_pct_by_venue": dict(self.max_drawdown_pct_by_venue),
+            "correlated_groups": {k: tuple(v) for k, v in self.correlated_groups.items()},
+            "max_correlation_group_concentration_ratio": self.max_correlation_group_concentration_ratio,
         }
 
 
@@ -387,6 +434,60 @@ def _check_asset_concentration(exposure_report: dict, snapshot, limits: Portfoli
         reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
         evidence={"max_symbol_share": max_share, "limit": limits.max_asset_concentration_ratio, "by_symbol": report["by_symbol"]},
     )
+
+
+def _check_correlation_group_concentration(exposure_report: dict, snapshot, limits: PortfolioLimits) -> list[DimensionVerdict]:
+    """2026-09-24 Lablab-audit extension (see module docstring addendum,
+    item 9 — optionwright / Alpacaruns). Reuses .43's own already-computed
+    `asset_concentration.by_symbol` shares — this does not re-derive
+    per-symbol exposure, only sums an existing number across a
+    caller-supplied group. Same data-quality gating as
+    `_check_asset_concentration` (aggregate cross-venue dimension: a
+    failed configured venue means the true group exposure cannot be
+    proven, not that it's zero).
+
+    One DimensionVerdict per configured group (dimension=
+    "correlation_group_concentration", the group name lives in
+    evidence["group"] rather than overloading the `venue` field, which
+    means trading venue everywhere else in this module). If no groups are
+    configured at all, returns a single LIMIT_NOT_CONFIGURED placeholder
+    so the dimension is always visible in the decision, matching this
+    module's own "never silently omit a dimension" convention."""
+    blocked = _aggregate_data_quality_block(snapshot)
+    if blocked is not None:
+        return [DimensionVerdict(dimension="correlation_group_concentration", venue=None, verdict=BLOCK,
+                                  reason=blocked.reason, evidence=blocked.evidence)]
+
+    if not limits.correlated_groups:
+        return [DimensionVerdict(dimension="correlation_group_concentration", venue=None, verdict=LIMIT_NOT_CONFIGURED,
+                                  reason="NO_GROUPS_CONFIGURED", evidence={})]
+
+    report = exposure_report["asset_concentration"]
+    excluded = report.get("positions_excluded_no_notional", 0)
+    flat_book = len(snapshot.positions) == 0
+    if not flat_book and (report["status"] != "COMPUTABLE" or excluded):
+        return [DimensionVerdict(dimension="correlation_group_concentration", venue=None, verdict=BLOCK, reason="EXPOSURE_NOT_COMPUTABLE",
+                                  evidence={"upstream_status": report["status"], "positions_excluded_no_notional": excluded})]
+
+    by_symbol = report.get("by_symbol", {})
+    out: list[DimensionVerdict] = []
+    for group_name in sorted(limits.correlated_groups):
+        members = limits.correlated_groups[group_name]
+        member_shares = {sym: by_symbol.get(sym, 0.0) for sym in members}
+        group_share = sum(member_shares.values())
+        if limits.max_correlation_group_concentration_ratio is None:
+            out.append(DimensionVerdict(dimension="correlation_group_concentration", venue=None, verdict=LIMIT_NOT_CONFIGURED,
+                                         reason="NO_LIMIT_CONFIGURED",
+                                         evidence={"group": group_name, "group_share": group_share, "members": member_shares}))
+            continue
+        breached = group_share > limits.max_correlation_group_concentration_ratio
+        out.append(DimensionVerdict(
+            dimension="correlation_group_concentration", venue=None, verdict=BLOCK if breached else PASS,
+            reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
+            evidence={"group": group_name, "group_share": group_share,
+                      "limit": limits.max_correlation_group_concentration_ratio, "members": member_shares},
+        ))
+    return out
 
 
 def _check_directional_exposure(exposure_report: dict, snapshot, limits: PortfolioLimits) -> DimensionVerdict:
@@ -569,6 +670,7 @@ def evaluate_portfolio_enforcement(
     verdicts: list[DimensionVerdict] = []
     verdicts.append(_check_portfolio_heat(exposure_report, snapshot, limits))
     verdicts.append(_check_asset_concentration(exposure_report, snapshot, limits))
+    verdicts.extend(_check_correlation_group_concentration(exposure_report, snapshot, limits))
     verdicts.append(_check_directional_exposure(exposure_report, snapshot, limits))
     verdicts.extend(_check_leverage_exposure(exposure_report, snapshot, limits))
     verdicts.append(_check_mexc_leverage_cap(snapshot, limits))
@@ -633,7 +735,12 @@ def evaluate_hypothetical_trade(
                                           evidence={"positions": projected_cap["positions"], "cap": limits.mexc_leverage_cap}))
 
     # Current-state-only dimensions, unaffected by the hypothetical trade.
+    # correlation_group_concentration joins asset_concentration here for
+    # the same reason: .43's project_post_trade_exposure() helper does not
+    # extend to either, and this module does not build a second projection
+    # model on top of .43's (see module docstring point 2).
     verdicts.append(_check_asset_concentration(current_report, snapshot, limits))
+    verdicts.extend(_check_correlation_group_concentration(current_report, snapshot, limits))
     verdicts.extend(_check_daily_loss(current_report, snapshot, limits))
     verdicts.extend(_check_max_drawdown(current_report, snapshot, limits))
     verdicts.extend(_not_computable_verdicts())
