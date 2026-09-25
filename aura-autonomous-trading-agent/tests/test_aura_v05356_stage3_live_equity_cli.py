@@ -63,6 +63,9 @@ WAVE48 = _load("aura_v05348_elliott_wave_research", ROOT / "aura_v05348_elliott_
 ROTATION59 = _load("aura_v05359_sector_rotation", ROOT / "aura_v05359_sector_rotation.py")
 BUILDER60 = _load("aura_v05360_research_full_evidence_builder", ROOT / "aura_v05360_research_full_evidence_builder.py")
 ORCH362 = _load("aura_v05362_live_evidence_orchestrator", ROOT / "aura_v05362_live_evidence_orchestrator.py")
+ATR54 = _load("aura_v054_atr", ROOT / "aura_v054_atr.py")
+EXIT54 = _load("aura_v054_exit_engine", ROOT / "aura_v054_exit_engine.py")
+SIZING54 = _load("aura_v054_position_sizing", ROOT / "aura_v054_position_sizing.py")
 M = _load("aura_v05356_stage3_live_equity_cli", ROOT / "aura_v05356_stage3_live_equity_cli.py")
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -272,9 +275,23 @@ def test_load_symbol_requests_empty_list(tmp_path):
 
 
 def test_load_symbol_requests_missing_field(tmp_path):
-    p = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK"}])
+    p = make_symbol_requests_file(tmp_path, [{"asset_class": "STOCK", "quantity": 10}])
     with pytest.raises(M.Stage3CliError):
         M.load_symbol_requests(p)
+
+
+def test_load_symbol_requests_quantity_is_optional(tmp_path):
+    """As of 2026-09-25, omitting quantity is valid -- it means auto-sized
+    this cycle, not a missing-field error."""
+    p = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK"}])
+    reqs = M.load_symbol_requests(p)
+    assert reqs[0].quantity is None
+
+
+def test_load_symbol_requests_explicit_quantity_still_works(tmp_path):
+    p = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 10}])
+    reqs = M.load_symbol_requests(p)
+    assert reqs[0].quantity == 10
 
 
 def test_load_symbol_requests_duplicate_symbol(tmp_path):
@@ -364,6 +381,149 @@ def test_fetch_symbol_evidence_populates_bars_as_dicts_when_orchestrator_supplie
     )
     assert len(evidence.bars_as_dicts) == 60
     assert evidence.bars_as_dicts[-1]["close"] == pytest.approx(bars["close"].iloc[-1])
+
+
+def test_fetch_symbol_evidence_populates_atr_when_atr_module_supplied():
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    evidence = M.fetch_symbol_evidence(
+        "AAPL", bars_client=bars_client, technical_module=M51, short_technical_module=M52,
+        frozen_technical_params=SIGSRC.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=SIGSRC.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION, now=NOW,
+        atr_module=ATR54,
+    )
+    assert evidence.atr_at_entry is not None
+    assert evidence.atr_at_entry > 0
+
+
+def test_fetch_symbol_evidence_atr_none_without_atr_module():
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    evidence = M.fetch_symbol_evidence(
+        "AAPL", bars_client=bars_client, technical_module=M51, short_technical_module=M52,
+        frozen_technical_params=SIGSRC.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=SIGSRC.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION, now=NOW,
+    )
+    assert evidence.atr_at_entry is None
+
+
+def test_fetch_symbol_evidence_atr_none_when_insufficient_bars_for_warmup():
+    bars = make_bars(n=5)  # far fewer than ATR_PERIOD (14) -- every ATR value stays NaN
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    evidence = M.fetch_symbol_evidence(
+        "AAPL", bars_client=bars_client, technical_module=M51, short_technical_module=M52,
+        frozen_technical_params=SIGSRC.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=SIGSRC.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION, now=NOW,
+        atr_module=ATR54,
+    )
+    assert evidence.atr_at_entry is None
+
+
+# ============================================================================
+# resolve_quantity_for_symbol -- ATR risk-based position sizing (2026-09-25)
+# ============================================================================
+
+
+def test_resolve_quantity_explicit_quantity_always_wins():
+    req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=42)
+    ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
+    quantity, error = M.resolve_quantity_for_symbol(
+        req, ev, account_equity_usd=None, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
+    )
+    assert quantity == 42
+    assert error is None
+
+
+def test_resolve_quantity_auto_sizes_from_real_equity_and_atr():
+    req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
+    ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
+    quantity, error = M.resolve_quantity_for_symbol(
+        req, ev, account_equity_usd=100_000.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
+    )
+    assert error is None
+    # risk_capital = 100_000 * 0.005 = 500; planned_stop_distance = 2.0 * 2.0 = 4.0; quantity = floor(500/4.0) = 125
+    assert quantity == 125
+
+
+def test_resolve_quantity_fails_open_no_equity():
+    req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
+    ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
+    quantity, error = M.resolve_quantity_for_symbol(
+        req, ev, account_equity_usd=None, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
+    )
+    assert quantity is None
+    assert error == "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
+
+
+def test_resolve_quantity_fails_open_no_atr():
+    req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
+    ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=None)
+    quantity, error = M.resolve_quantity_for_symbol(
+        req, ev, account_equity_usd=100_000.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
+    )
+    assert quantity is None
+    assert error == "NO_USABLE_ATR_FOR_SIZING"
+
+
+def test_resolve_quantity_fails_open_zero_shares():
+    req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
+    # tiny equity -> risk_capital (equity * 0.005) is smaller than one share's
+    # planned risk (atr_at_entry * trail_atr_mult), so quantity floors to 0.
+    # atr_at_entry=1.0 keeps the stop distance (2.0) well under entry_price
+    # (100.0), so this does not trip exit_engine's DEGENERATE_STOP_DISTANCE
+    # guard -- it's a genuine "risk budget too small" case, not a bad input.
+    ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=1.0)
+    quantity, error = M.resolve_quantity_for_symbol(
+        req, ev, account_equity_usd=1.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
+    )
+    assert quantity is None
+    assert error == "SIZING_ROUNDED_TO_ZERO_SHARES"
+
+
+def test_run_live_dry_run_cycle_auto_sizes_quantity_end_to_end(monkeypatch):
+    captured_args = {}
+    real_run_stage1a = STAGE1.run_stage1a_dry_run
+
+    def _spy(symbol_requests, **kwargs):
+        captured_args["symbol_requests"] = symbol_requests
+        return real_run_stage1a(symbol_requests, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1a_dry_run", _spy)
+
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+
+    M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        bars_client=bars_client, alpaca_client=alpaca_client, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=False, now=NOW,
+    )
+    reqs = captured_args["symbol_requests"]
+    assert len(reqs) == 1
+    assert reqs[0].quantity is not None
+    assert reqs[0].quantity > 0
+
+
+def test_run_live_dry_run_cycle_skips_unsizeable_symbol_not_whole_cycle():
+    """No account equity fetched (skipped) and no explicit quantity ->
+    that symbol is skipped, recorded in sizing_failures, not raised."""
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    result = M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
+    )
+    assert len(result["sizing_failures"]) == 1
+    assert result["sizing_failures"][0]["symbol"] == "AAPL"
+    assert result["sizing_failures"][0]["error"] == "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
+    assert result["stage1_report"] is None
 
 
 def test_fetch_symbol_evidence_bars_as_dicts_empty_without_orchestrator():

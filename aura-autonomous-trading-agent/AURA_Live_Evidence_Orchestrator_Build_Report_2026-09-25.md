@@ -122,12 +122,60 @@ if benchmark/safe-haven bars are unavailable (recorded, not raised).
   has been, or can be, submitted by anything built this session.
 - Track A (`mexc_bot/`) — not touched.
 
-## 6. What this does NOT yet do
+## 6. Addendum — ATR risk-based position sizing (same date, follow-on)
 
-Position sizing (`.054_position_sizing` → `SymbolRequest.quantity`) is
-still not wired in — `.356`'s `LiveSymbolRequest.quantity` is still
-caller-supplied via the requests JSON file, not computed. A manual-
-trigger path for `run_stage1b_paper_cycle` (an actual capped paper order)
-does not exist yet and was not built or attempted this session. No git
-commit or push has been made — per standing instruction, that requires
-Martin's explicit go-ahead.
+Following "continue to position sizing," three more scoping questions
+were confirmed via `AskUserQuestion` before any code was written:
+
+- `LiveSymbolRequest.quantity` becomes **optional**: when omitted, size
+  is auto-computed via ATR risk sizing; an explicit `quantity` in the
+  requests JSON still always wins (no behavior change for existing
+  configs).
+- Short-side sizing reuses the **same stop-distance magnitude** as the
+  existing long-only formula (`.054_exit_engine.initial_stop_distance_long`)
+  — confirmed with Martin since no separate short-side formula exists
+  anywhere in the repo, and the distance is a magnitude, not a signed
+  price level.
+- When a symbol can't be sized in a given cycle (no account equity, no
+  usable ATR, or the risk budget floors to 0 shares), **that symbol
+  alone is skipped** — recorded in the cycle output — and the rest of
+  the cycle proceeds. Sizing never raises/blocks the whole cycle.
+
+### What was built
+
+- `aura_v05356_stage3_live_equity_cli.py` (edited, additive):
+  - `SymbolEvidence` gained `atr_at_entry`, computed in
+    `fetch_symbol_evidence()` from the **same already-fetched** `bars_df`
+    via `.054_atr.wilder_atr_from_bars()` (last valid, non-NaN ATR value;
+    never re-fetches bars).
+  - New `resolve_quantity_for_symbol()`: explicit quantity always wins;
+    otherwise computes `planned_stop_distance` via `.054_exit_engine`
+    and quantity via `.054_position_sizing.size_position_by_atr_risk()`
+    (0.5% equity risk per trade, Martin's existing `.54`-approved
+    value). Returns `(None, <reason>)` on any precondition failure or a
+    zero-share result — never raises.
+  - `run_live_dry_run_cycle()` now sizes every otherwise-usable request,
+    skips ones that can't be sized (recording `sizing_failures`), and
+    only builds `SymbolRequest`s for the sizeable remainder.
+  - New output keys: `position_sizing_note`, `sizing_failures`.
+
+### Test coverage and verification
+
+- `tests/test_aura_v05356_stage3_live_equity_cli.py` extended with 9 new
+  tests: ATR population (with/without the module supplied, and with
+  insufficient warm-up bars), explicit-quantity-wins, real ATR-risk
+  auto-sizing (exact-value check), each of the three fail-open reasons,
+  and two end-to-end cycle tests (auto-sizing end to end; an unsizeable
+  symbol skipped without blocking the cycle).
+- `.356` file alone: 44 passed. Combined with `.362`: 57 passed.
+- **Full suite:** 1280 passed, 10 failed — the same 10 pre-existing
+  `.336`/`.338`/`.352`/`.355` clock-drift failures as before. No new
+  regressions.
+
+## 7. What this does NOT yet do
+
+A manual-trigger path for `run_stage1b_paper_cycle` (an actual capped
+paper order — 1-2 symbols, `max_new_orders_per_cycle=1`) does not exist
+yet and was not built or attempted this session. No git commit or push
+has been made for the position-sizing work — per standing instruction,
+that requires Martin's explicit go-ahead.

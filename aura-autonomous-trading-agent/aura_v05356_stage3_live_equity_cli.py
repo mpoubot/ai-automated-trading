@@ -105,6 +105,26 @@ Scope
 Equity/ETF only, Alpaca only. Track A/MEXC is not imported, referenced,
 or touched anywhere in this module.
 
+Extension -- 2026-09-25, ATR risk-based position sizing
+------------------------------------------------------------------------
+`LiveSymbolRequest.quantity` is now OPTIONAL. When omitted, this module
+computes it via `.054_position_sizing.size_position_by_atr_risk()`
+(Martin's already-approved `RISK_FRACTION_PER_TRADE = 0.005`, i.e. 0.5%
+of real account equity risked per trade), using `.054_atr`'s Wilder ATR
+on the same bars already fetched for `.51`/`.52` (never fetched twice)
+and `.054_exit_engine.initial_stop_distance_long()` for the planned stop
+distance. Per Martin's explicit confirmation (2026-09-25, AskUserQuestion):
+that same distance magnitude is reused for short-side sizing too (it is a
+pure `ATR * trail_atr_mult` magnitude with no directional logic --
+`.054_exit_engine.py` has no separate short-side formula, and none is
+invented here). Supplying an explicit `quantity` in `--requests-config`
+still overrides auto-sizing for that symbol, unchanged.
+
+A symbol that cannot be sized this cycle (real equity unavailable, not
+enough bars for a non-NaN ATR, or the risk budget rounds to zero shares)
+is skipped for this cycle only -- recorded in the output, never blocks
+other symbols or raises (Martin, 2026-09-25).
+
 Extension -- 2026-09-25, live evidence (sentiment + wave + sector rotation)
 ------------------------------------------------------------------------
 Per Martin's explicit request ("what needs to change so I can start seeing
@@ -218,6 +238,18 @@ def load_orchestrator_module():
     return _load_module("aura_v05362_live_evidence_orchestrator", "aura_v05362_live_evidence_orchestrator.py")
 
 
+def load_atr_module():
+    return _load_module("aura_v054_atr", "aura_v054_atr.py")
+
+
+def load_exit_engine_module():
+    return _load_module("aura_v054_exit_engine", "aura_v054_exit_engine.py")
+
+
+def load_position_sizing_module():
+    return _load_module("aura_v054_position_sizing", "aura_v054_position_sizing.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -288,7 +320,7 @@ def build_news_client(api_key: str, secret_key: str) -> Any:
 class LiveSymbolRequest:
     symbol: str
     asset_class: str  # "STOCK" or "ETF"
-    quantity: Any
+    quantity: Any = None  # None -> auto-sized via ATR risk sizing this cycle (see module docstring, "Extension -- 2026-09-25, ATR risk-based position sizing")
 
     def __post_init__(self) -> None:
         if self.asset_class not in REQUIRED_ASSET_CLASSES:
@@ -297,11 +329,13 @@ class LiveSymbolRequest:
 
 def load_symbol_requests(path: Path) -> tuple[LiveSymbolRequest, ...]:
     """Reads a required, caller-supplied JSON file: a list of
-    `{"symbol": "...", "asset_class": "STOCK"|"ETF", "quantity": <number>}`
+    `{"symbol": "...", "asset_class": "STOCK"|"ETF", "quantity": <number, optional>}`
     objects -- mirroring the MEXC Track A precedent
     (`scripts/run_execution_spec_for_latest_cycle.py`'s `--sizing-config`):
-    no default symbol universe or quantity is ever invented here; an
-    absent or empty file fails closed."""
+    no default symbol universe is ever invented here; an absent or empty
+    file fails closed. `quantity` is OPTIONAL as of 2026-09-25 -- omitting
+    it (or passing `null`) means this cycle auto-sizes that symbol via
+    ATR risk sizing; supplying a number still overrides auto-sizing."""
     if not path.exists():
         raise Stage3CliError(f"SYMBOL_REQUESTS_FILE_NOT_FOUND:{path}")
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -309,10 +343,10 @@ def load_symbol_requests(path: Path) -> tuple[LiveSymbolRequest, ...]:
         raise Stage3CliError(f"SYMBOL_REQUESTS_FILE_EMPTY_OR_INVALID:{path}")
     requests = []
     for i, entry in enumerate(raw):
-        for field in ("symbol", "asset_class", "quantity"):
+        for field in ("symbol", "asset_class"):
             if field not in entry:
                 raise Stage3CliError(f"SYMBOL_REQUESTS_ENTRY_MISSING_FIELD:index={i}:field={field}")
-        requests.append(LiveSymbolRequest(symbol=entry["symbol"], asset_class=entry["asset_class"], quantity=entry["quantity"]))
+        requests.append(LiveSymbolRequest(symbol=entry["symbol"], asset_class=entry["asset_class"], quantity=entry.get("quantity")))
     symbols_seen = [r.symbol for r in requests]
     if len(set(symbols_seen)) != len(symbols_seen):
         raise Stage3CliError("DUPLICATE_SYMBOL_IN_SYMBOL_REQUESTS_FILE")
@@ -333,6 +367,7 @@ class SymbolEvidence:
     short_technical_regime: Any  # `.52` ShortTechnicalRegime
     last_close: float | None
     bars_as_dicts: tuple[dict[str, Any], ...] = ()  # `.62`'s list[dict] shape, for sentiment/wave/sector-rotation reuse -- never fetched twice
+    atr_at_entry: float | None = None  # `.054_atr` Wilder ATR, last non-NaN value -- for position sizing, never fetched twice
     fetch_error: str | None = None
 
 
@@ -348,6 +383,7 @@ def fetch_symbol_evidence(
     universe_version: str,
     now: datetime,
     orchestrator_module: Any | None = None,
+    atr_module: Any | None = None,
 ) -> SymbolEvidence:
     """Never raises for an ordinary fetch failure (network hiccup, symbol
     with no data, etc.) -- returns a `SymbolEvidence` with `fetch_error`
@@ -360,6 +396,13 @@ def fetch_symbol_evidence(
     the `list[dict]` shape `.48`/`.359`/`.360` need, so no symbol's bars
     are ever fetched twice (see module docstring, "Reference price for
     `.44` enforcement" for the established precedent of this discipline).
+
+    `atr_module`, when supplied, is `.054_atr` -- used to compute Wilder
+    ATR on the SAME bars, for position sizing (see module docstring,
+    "Extension -- 2026-09-25, ATR risk-based position sizing"). `atr_at_
+    entry` stays `None` when insufficient bars leave every ATR value NaN
+    -- this is warm-up, not a computed zero, and callers must never treat
+    it as sizeable.
     """
     try:
         bars_df = technical_module.fetch_recent_bars(symbol, client=bars_client, lookback_bars=lookback_bars, end=now)
@@ -378,10 +421,54 @@ def fetch_symbol_evidence(
     bars_as_dicts: tuple[dict[str, Any], ...] = ()
     if orchestrator_module is not None:
         bars_as_dicts = tuple(orchestrator_module.bars_df_to_research_dicts(bars_df))
+    atr_at_entry: float | None = None
+    if atr_module is not None and len(bars_df):
+        atr_result = atr_module.wilder_atr_from_bars(bars_df)
+        valid_atr = atr_result.atr.dropna()
+        if len(valid_atr):
+            atr_at_entry = float(valid_atr.iloc[-1])
     return SymbolEvidence(
         symbol=symbol, technical_regime=technical_regime, short_technical_regime=short_regime,
-        last_close=last_close, bars_as_dicts=bars_as_dicts,
+        last_close=last_close, bars_as_dicts=bars_as_dicts, atr_at_entry=atr_at_entry,
     )
+
+
+def resolve_quantity_for_symbol(
+    request: "LiveSymbolRequest",
+    evidence: SymbolEvidence,
+    *,
+    account_equity_usd: float | None,
+    exit_engine_module: Any,
+    position_sizing_module: Any,
+) -> tuple[Any, str | None]:
+    """Returns `(quantity, sizing_error)`. If `request.quantity` is
+    explicitly supplied, it always wins (manual override, unchanged
+    behavior). Otherwise computes it via ATR risk sizing. On any
+    precondition failure (no real equity fetched, no usable ATR) or a
+    computed size of zero shares, returns `(None, <reason>)` -- the
+    caller skips this symbol for the cycle rather than submitting a
+    fabricated or zero-size request (Martin, 2026-09-25)."""
+    if request.quantity is not None:
+        return request.quantity, None
+    if account_equity_usd is None:
+        return None, "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
+    if evidence.last_close is None:
+        return None, "NO_REFERENCE_PRICE_AVAILABLE_FOR_SIZING"
+    if evidence.atr_at_entry is None:
+        return None, "NO_USABLE_ATR_FOR_SIZING"
+    try:
+        planned_stop_distance = exit_engine_module.initial_stop_distance_long(
+            entry_price=evidence.last_close, atr_at_entry=evidence.atr_at_entry,
+        )
+        sizing_result = position_sizing_module.size_position_by_atr_risk(
+            equity=account_equity_usd, entry_price=evidence.last_close,
+            planned_stop_distance=planned_stop_distance,
+        )
+    except (exit_engine_module.ExitEngineError, position_sizing_module.PositionSizingError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if sizing_result.quantity <= 0:
+        return None, "SIZING_ROUNDED_TO_ZERO_SHARES"
+    return sizing_result.quantity, None
 
 
 def build_reference_price_fn(evidence_by_symbol: dict[str, SymbolEvidence]) -> Callable[[str], float]:
@@ -447,6 +534,9 @@ def run_live_dry_run_cycle(
     observability_module = load_observability_module()
     enforcement_module = load_enforcement_module()
     orchestrator_module = load_orchestrator_module()
+    atr_module = load_atr_module()
+    exit_engine_module = load_exit_engine_module()
+    position_sizing_module = load_position_sizing_module()
 
     evidence_by_symbol: dict[str, SymbolEvidence] = {}
     for r in symbol_requests:
@@ -456,7 +546,7 @@ def run_live_dry_run_cycle(
             frozen_technical_params=signal_source_module.FROZEN_TECHNICAL_PARAMS,
             frozen_short_technical_params=signal_source_module.FROZEN_SHORT_TECHNICAL_PARAMS,
             lookback_bars=lookback_bars, universe_version=universe_version, now=now_dt,
-            orchestrator_module=orchestrator_module,
+            orchestrator_module=orchestrator_module, atr_module=atr_module,
         )
 
     usable_requests = [r for r in symbol_requests if evidence_by_symbol[r.symbol].fetch_error is None]
@@ -498,15 +588,32 @@ def run_live_dry_run_cycle(
     limits = enforcement_module.PortfolioLimits()
     reference_price_fn = build_reference_price_fn(evidence_by_symbol)
 
+    # -- Position sizing (see module docstring, "Extension -- 2026-09-25,
+    # ATR risk-based position sizing"). A symbol that cannot be sized this
+    # cycle is skipped for this cycle only, recorded, never blocks others.
+    resolved_quantity_by_symbol: dict[str, Any] = {}
+    sizing_failures: list[dict[str, Any]] = []
+    sizeable_requests = []
+    for r in usable_requests:
+        quantity, sizing_error = resolve_quantity_for_symbol(
+            r, evidence_by_symbol[r.symbol], account_equity_usd=account_equity_usd,
+            exit_engine_module=exit_engine_module, position_sizing_module=position_sizing_module,
+        )
+        if sizing_error is not None:
+            sizing_failures.append({"symbol": r.symbol, "error": sizing_error})
+            continue
+        resolved_quantity_by_symbol[r.symbol] = quantity
+        sizeable_requests.append(r)
+
     stage1_symbol_requests = tuple(
         stage1_module.SymbolRequest(
-            symbol=r.symbol, asset_class=r.asset_class, quantity=r.quantity,
+            symbol=r.symbol, asset_class=r.asset_class, quantity=resolved_quantity_by_symbol[r.symbol],
             technical_regime=evidence_by_symbol[r.symbol].technical_regime,
             short_technical_regime=evidence_by_symbol[r.symbol].short_technical_regime,
             sentiment_regime=getattr(live_evidence_by_symbol.get(r.symbol), "sentiment_regime", None),
             wave_result=getattr(live_evidence_by_symbol.get(r.symbol), "wave_result", None),
         )
-        for r in usable_requests
+        for r in sizeable_requests
     )
 
     report = None
@@ -554,6 +661,12 @@ def run_live_dry_run_cycle(
         ),
         "account_equity_usd": account_equity_usd,
         "symbol_fetch_failures": fetch_failures,
+        "position_sizing_note": (
+            "quantity is auto-sized via .054_position_sizing (0.5% equity risk) for any symbol whose "
+            "requests-config entry omits it; an explicit quantity always overrides. See sizing_failures "
+            "for symbols skipped this cycle because they could not be sized."
+        ),
+        "sizing_failures": sizing_failures,
         "stage1_report": _stage1_report_to_dict(report, stage1_module) if report is not None else None,
     }
 
