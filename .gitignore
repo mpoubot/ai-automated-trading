@@ -48,3 +48,6 @@ reports/
 # Large generated archives
 *.zip
 *.bundle
+
+# AI agent tool-state cache (not part of the app)
+.claude-flow/
