@@ -104,6 +104,28 @@ Scope
 ------------------------------------------------------------------------
 Equity/ETF only, Alpaca only. Track A/MEXC is not imported, referenced,
 or touched anywhere in this module.
+
+Extension -- 2026-09-25, live evidence (sentiment + wave + sector rotation)
+------------------------------------------------------------------------
+Per Martin's explicit request ("what needs to change so I can start seeing
+performance with live paper-trading money") and subsequent scoping
+(`AskUserQuestion`, 2026-09-24/25: full evidence pipeline, not technical-
+only; SPY benchmark, GLD+SLV safe havens, the existing 27-symbol universe;
+sector rotation compute+log only; technical/sentiment/wave weights all
+1.0), this module now ALSO fetches real Alpaca news and builds real
+sentiment/Elliott-Wave/sector-rotation evidence via the new
+`aura_v05362_live_evidence_orchestrator.py`, and populates `.55`'s
+previously-always-`None` `sentiment_regime`/`wave_result` fields with it.
+
+This does NOT change the structural-safety guarantee above: this module
+still only ever calls `run_stage1a_dry_run` (never `run_stage1b_paper_
+cycle`), and `decide_kwargs` now comes from `.362`'s own
+`LIVE_EVIDENCE_DECIDE_KWARGS` rather than `aura_v054_signal_source.
+FROZEN_DECIDE_KWARGS` -- see `.362`'s module docstring for why that
+constant is deliberately kept separate from `.054`'s frozen one. Running
+this CLI today, with real credentials and real market/news data, will
+produce real (non-forced-ABSTAIN) `TradingDecision`s for the first time --
+still only ever previewed via `.38`, never submitted.
 """
 from __future__ import annotations
 
@@ -112,7 +134,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -185,6 +207,17 @@ def load_enforcement_module():
     return _load_module("aura_v05344_portfolio_exposure_enforcement", "aura_v05344_portfolio_exposure_enforcement.py")
 
 
+def load_news_module():
+    return _load_module("aura_v05346_news_ingestion_classification", "aura_v05346_news_ingestion_classification.py")
+
+
+def load_orchestrator_module():
+    """`.362`'s module -- source of the new `LIVE_EVIDENCE_DECIDE_KWARGS`
+    and the sentiment/wave/sector-rotation evidence builder (see module
+    docstring, "Extension -- 2026-09-25")."""
+    return _load_module("aura_v05362_live_evidence_orchestrator", "aura_v05362_live_evidence_orchestrator.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -230,6 +263,20 @@ def build_bars_client(api_key: str, secret_key: str, technical_module: Any) -> A
     """`.51`'s own `AlpacaHistoricalBarsClient` wrapper -- read-only
     market-data calls only."""
     return technical_module.AlpacaHistoricalBarsClient(api_key, secret_key)
+
+
+def build_news_client(api_key: str, secret_key: str) -> Any:
+    """Real `alpaca-py NewsClient` -- read-only `get_news` calls only,
+    via `.46`'s `ingest_and_classify_news`. Reuses the same dedicated
+    equity-paper credential pair as `build_bars_client`/
+    `build_trading_client`; Alpaca's news endpoint is not paper/live-
+    account-scoped, so no separate credential pair is invented for it.
+    This is the FIRST real construction of this client anywhere in this
+    repo (previously only ever exercised against a fake in tests) -- see
+    `.362`'s module docstring."""
+    from alpaca.data.historical.news import NewsClient
+
+    return NewsClient(api_key, secret_key)
 
 
 # ============================================================================
@@ -285,6 +332,7 @@ class SymbolEvidence:
     technical_regime: Any  # `.51` TechnicalRegime
     short_technical_regime: Any  # `.52` ShortTechnicalRegime
     last_close: float | None
+    bars_as_dicts: tuple[dict[str, Any], ...] = ()  # `.62`'s list[dict] shape, for sentiment/wave/sector-rotation reuse -- never fetched twice
     fetch_error: str | None = None
 
 
@@ -299,12 +347,20 @@ def fetch_symbol_evidence(
     lookback_bars: int,
     universe_version: str,
     now: datetime,
+    orchestrator_module: Any | None = None,
 ) -> SymbolEvidence:
     """Never raises for an ordinary fetch failure (network hiccup, symbol
     with no data, etc.) -- returns a `SymbolEvidence` with `fetch_error`
     set instead, exactly mirroring `.55`'s own `fetch_real_alpaca_asset`
     "never raises, caller checks status" discipline. A programmer error
-    (invalid params) still raises."""
+    (invalid params) still raises.
+
+    `orchestrator_module`, when supplied, is `.362` -- used only to
+    convert the SAME bars DataFrame this function already fetched into
+    the `list[dict]` shape `.48`/`.359`/`.360` need, so no symbol's bars
+    are ever fetched twice (see module docstring, "Reference price for
+    `.44` enforcement" for the established precedent of this discipline).
+    """
     try:
         bars_df = technical_module.fetch_recent_bars(symbol, client=bars_client, lookback_bars=lookback_bars, end=now)
     except technical_module.LiveSignalSourceError as exc:
@@ -319,7 +375,13 @@ def fetch_symbol_evidence(
         symbol, bars_df, params=frozen_short_technical_params, universe_version=universe_version, now=now,
     )
     last_close = float(bars_df["close"].iloc[-1]) if len(bars_df) else None
-    return SymbolEvidence(symbol=symbol, technical_regime=technical_regime, short_technical_regime=short_regime, last_close=last_close)
+    bars_as_dicts: tuple[dict[str, Any], ...] = ()
+    if orchestrator_module is not None:
+        bars_as_dicts = tuple(orchestrator_module.bars_df_to_research_dicts(bars_df))
+    return SymbolEvidence(
+        symbol=symbol, technical_regime=technical_regime, short_technical_regime=short_regime,
+        last_close=last_close, bars_as_dicts=bars_as_dicts,
+    )
 
 
 def build_reference_price_fn(evidence_by_symbol: dict[str, SymbolEvidence]) -> Callable[[str], float]:
@@ -371,6 +433,9 @@ def run_live_dry_run_cycle(
     universe_version: str,
     max_snapshot_age_seconds: float,
     skip_account_equity_fetch: bool,
+    news_client: Any | None = None,
+    news_state_dir: Path | None = None,
+    news_fetch_limit: int = 50,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now_dt = now or datetime.now(timezone.utc)
@@ -381,6 +446,7 @@ def run_live_dry_run_cycle(
     stage1_module = load_stage1_runner_module()
     observability_module = load_observability_module()
     enforcement_module = load_enforcement_module()
+    orchestrator_module = load_orchestrator_module()
 
     evidence_by_symbol: dict[str, SymbolEvidence] = {}
     for r in symbol_requests:
@@ -390,6 +456,7 @@ def run_live_dry_run_cycle(
             frozen_technical_params=signal_source_module.FROZEN_TECHNICAL_PARAMS,
             frozen_short_technical_params=signal_source_module.FROZEN_SHORT_TECHNICAL_PARAMS,
             lookback_bars=lookback_bars, universe_version=universe_version, now=now_dt,
+            orchestrator_module=orchestrator_module,
         )
 
     usable_requests = [r for r in symbol_requests if evidence_by_symbol[r.symbol].fetch_error is None]
@@ -398,8 +465,28 @@ def run_live_dry_run_cycle(
         for r in symbol_requests if evidence_by_symbol[r.symbol].fetch_error is not None
     ]
 
+    # -- Live evidence (sentiment + wave + sector-rotation, logged only) --
+    # see module docstring, "Extension -- 2026-09-25". Fail-open: no news
+    # client/state dir supplied (e.g. an older caller, or a test) simply
+    # means every symbol gets empty news evidence -- never a raised error.
+    news_ingestion_status: dict[str, Any] | None = None
+    live_evidence_by_symbol: dict[str, Any] = {}
+    if news_client is not None and news_state_dir is not None and usable_requests:
+        news_events, news_ingestion_status = orchestrator_module.fetch_universe_news_events(
+            news_client, news_state_dir,
+            symbols=tuple(r.symbol for r in usable_requests),
+            start=now_dt - timedelta(hours=orchestrator_module.SENTIMENT_WAVE_PARAMS["decay_window_hours"]),
+            end=now_dt, limit=news_fetch_limit, now=now_dt,
+        )
+        bars_as_dicts_by_symbol = {
+            r.symbol: list(evidence_by_symbol[r.symbol].bars_as_dicts) for r in usable_requests
+        }
+        live_evidence_by_symbol = orchestrator_module.build_live_evidence_for_universe(
+            bars_as_dicts_by_symbol, news_events, now=now_dt,
+        )
+
     decide_kwargs = dict(
-        signal_source_module.FROZEN_DECIDE_KWARGS,
+        orchestrator_module.LIVE_EVIDENCE_DECIDE_KWARGS,
         proposal_module=_load_module("aura_v05349_ai_proposal_pipeline", "aura_v05349_ai_proposal_pipeline.py"),
         llm_client=signal_source_module.NeutralDeterministicLLMClient(),
     )
@@ -416,6 +503,8 @@ def run_live_dry_run_cycle(
             symbol=r.symbol, asset_class=r.asset_class, quantity=r.quantity,
             technical_regime=evidence_by_symbol[r.symbol].technical_regime,
             short_technical_regime=evidence_by_symbol[r.symbol].short_technical_regime,
+            sentiment_regime=getattr(live_evidence_by_symbol.get(r.symbol), "sentiment_regime", None),
+            wave_result=getattr(live_evidence_by_symbol.get(r.symbol), "wave_result", None),
         )
         for r in usable_requests
     )
@@ -442,12 +531,23 @@ def run_live_dry_run_cycle(
         "lookback_bars": lookback_bars,
         "technical_scoring_params_source": "aura_v054_signal_source.FROZEN_TECHNICAL_PARAMS",
         "short_technical_scoring_params_source": "aura_v054_signal_source.FROZEN_SHORT_TECHNICAL_PARAMS",
-        "decide_kwargs_source": "aura_v054_signal_source.FROZEN_DECIDE_KWARGS",
-        "technical_weight_is_zero_warning": (
-            "FROZEN_DECIDE_KWARGS.technical_weight == 0.0 and short_technical_weight == 0.0 -- "
-            "every decision this cycle produces is mathematically forced to ABSTAIN regardless of "
-            "the real .51/.52 evidence fetched; see module docstring."
+        "decide_kwargs_source": "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS",
+        "live_evidence_note": (
+            "technical_weight/short_technical_weight/sentiment_weight/wave_weight are all 1.0 as of "
+            "2026-09-25 (Martin, AskUserQuestion) -- decisions can now be non-ABSTAIN. "
+            "sector_rotation_weight stays 0.0 (compute + log only this round); see "
+            "sector_rotation_by_symbol below and .362's module docstring."
         ),
+        "news_ingestion_status": news_ingestion_status,
+        "sentiment_wave_params": dict(orchestrator_module.SENTIMENT_WAVE_PARAMS),
+        "sector_rotation_params": dict(orchestrator_module.SECTOR_ROTATION_PARAMS),
+        "sector_rotation_by_symbol": {
+            symbol: (ev.sector_rotation_regime.to_dict() if ev.sector_rotation_regime is not None else None)
+            for symbol, ev in live_evidence_by_symbol.items()
+        },
+        "live_evidence_build_errors": {
+            symbol: ev.build_error for symbol, ev in live_evidence_by_symbol.items() if ev.build_error is not None
+        },
         "account_equity_usd_source": (
             "SKIPPED_BY_FLAG" if skip_account_equity_fetch else
             ("REAL_ALPACA_GET_ACCOUNT" if account_equity_usd is not None else "UNAVAILABLE_VENUE_NOT_SUCCESS")
@@ -503,6 +603,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--skip-account-equity-fetch", action="store_true",
                          help="Skip even the read-only get_account() call; .44 enforcement then runs with no "
                               "equity source (fail-closed BLOCK on EXPOSURE_NOT_COMPUTABLE), not disabled.")
+    parser.add_argument("--news-state-dir", type=Path, default=None,
+                         help="Directory for .46's persisted news ledger (news_events.json). Required to fetch "
+                              "real sentiment/wave/sector-rotation evidence -- see module docstring, 'Extension "
+                              "-- 2026-09-25'. Omit to skip news/live-evidence entirely and fall back to "
+                              "sentiment_regime=None/wave_result=None (same behavior as before this extension).")
+    parser.add_argument("--news-fetch-limit", type=int, default=50,
+                         help="Per .46's own ingest_and_classify_news default (50) -- not invented here.")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
 
@@ -513,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
 
         bars_client = build_bars_client(api_key, secret_key, technical_module)
         alpaca_client = None if args.skip_account_equity_fetch else build_trading_client(api_key, secret_key)
+        news_client = build_news_client(api_key, secret_key) if args.news_state_dir is not None else None
 
         symbol_requests = load_symbol_requests(args.requests_config)
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
@@ -523,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             max_new_orders_per_cycle=args.max_new_orders_per_cycle, lookback_bars=lookback_bars,
             universe_version=universe_version, max_snapshot_age_seconds=args.max_snapshot_age_seconds,
             skip_account_equity_fetch=args.skip_account_equity_fetch,
+            news_client=news_client, news_state_dir=args.news_state_dir, news_fetch_limit=args.news_fetch_limit,
         )
     except Stage3CliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)

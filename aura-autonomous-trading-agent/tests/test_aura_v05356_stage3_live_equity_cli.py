@@ -58,6 +58,11 @@ FILL = _load("aura_v05354_alpaca_equity_fill_reconciliation", ROOT / "aura_v0535
 STUB = _load("aura_v054_llm_stub", ROOT / "aura_v054_llm_stub.py")
 SIGSRC = _load("aura_v054_signal_source", ROOT / "aura_v054_signal_source.py")
 STAGE1 = _load("aura_v05355_stage1_paper_trading_runner", ROOT / "aura_v05355_stage1_paper_trading_runner.py")
+NEWS46 = _load("aura_v05346_news_ingestion_classification", ROOT / "aura_v05346_news_ingestion_classification.py")
+WAVE48 = _load("aura_v05348_elliott_wave_research", ROOT / "aura_v05348_elliott_wave_research.py")
+ROTATION59 = _load("aura_v05359_sector_rotation", ROOT / "aura_v05359_sector_rotation.py")
+BUILDER60 = _load("aura_v05360_research_full_evidence_builder", ROOT / "aura_v05360_research_full_evidence_builder.py")
+ORCH362 = _load("aura_v05362_live_evidence_orchestrator", ROOT / "aura_v05362_live_evidence_orchestrator.py")
 M = _load("aura_v05356_stage3_live_equity_cli", ROOT / "aura_v05356_stage3_live_equity_cli.py")
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -127,6 +132,41 @@ class FakeBarsClient:
         if symbol not in self._bars_by_symbol:
             return _FakeBarsResponse(pd.DataFrame())
         return _FakeBarsResponse(self._bars_by_symbol[symbol])
+
+
+class FakeArticle:
+    def __init__(self, id, headline, summary="", url=None, author="Staff",
+                 created_at=None, updated_at=None, symbols=None, source="Benzinga"):
+        self.id = id
+        self.headline = headline
+        self.summary = summary
+        self.url = url
+        self.author = author
+        self.created_at = created_at or NOW
+        self.updated_at = updated_at or NOW
+        self.symbols = symbols if symbols is not None else []
+        self.source = source
+
+
+class FakeNewsSet:
+    def __init__(self, articles):
+        self.data = {"news": list(articles)}
+
+
+class FakeNewsClient:
+    """Duck-typed stand-in for `.46`'s real `NewsClient` (matches `.46`'s
+    own test fixture)."""
+
+    def __init__(self, articles=None, raise_exc=None):
+        self._articles = articles or []
+        self._raise_exc = raise_exc
+        self.calls: list = []
+
+    def get_news(self, request_params):
+        self.calls.append(request_params)
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return FakeNewsSet(self._articles)
 
 
 def make_bars(n=60, start_price=100.0, tz_index=True) -> pd.DataFrame:
@@ -312,6 +352,50 @@ def test_fetch_symbol_evidence_success_builds_both_regimes_and_last_close():
     assert isinstance(evidence.short_technical_regime, M52.ShortTechnicalRegime)
 
 
+def test_fetch_symbol_evidence_populates_bars_as_dicts_when_orchestrator_supplied():
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    evidence = M.fetch_symbol_evidence(
+        "AAPL", bars_client=bars_client, technical_module=M51, short_technical_module=M52,
+        frozen_technical_params=SIGSRC.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=SIGSRC.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION, now=NOW,
+        orchestrator_module=ORCH362,
+    )
+    assert len(evidence.bars_as_dicts) == 60
+    assert evidence.bars_as_dicts[-1]["close"] == pytest.approx(bars["close"].iloc[-1])
+
+
+def test_fetch_symbol_evidence_bars_as_dicts_empty_without_orchestrator():
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    evidence = M.fetch_symbol_evidence(
+        "AAPL", bars_client=bars_client, technical_module=M51, short_technical_module=M52,
+        frozen_technical_params=SIGSRC.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=SIGSRC.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION, now=NOW,
+    )
+    assert evidence.bars_as_dicts == ()
+
+
+def test_build_news_client_constructs_real_news_client(monkeypatch):
+    import types
+
+    constructed = {}
+
+    class _FakeRealNewsClient:
+        def __init__(self, key, secret):
+            constructed.update(key=key, secret=secret)
+
+    fake_alpaca_news = types.ModuleType("alpaca.data.historical.news")
+    fake_alpaca_news.NewsClient = _FakeRealNewsClient
+    monkeypatch.setitem(sys.modules, "alpaca.data.historical.news", fake_alpaca_news)
+
+    client = M.build_news_client("FAKE_KEY", "FAKE_SECRET")
+    assert isinstance(client, _FakeRealNewsClient)
+    assert constructed == {"key": "FAKE_KEY", "secret": "FAKE_SECRET"}
+
+
 def test_fetch_symbol_evidence_network_failure_never_raises():
     bars_client = FakeBarsClient(exception=RuntimeError("connection reset"))
     evidence = M.fetch_symbol_evidence(
@@ -423,17 +507,120 @@ def test_run_live_dry_run_cycle_never_touches_stage1b_or_submission(monkeypatch)
     assert alpaca_client.submit_calls == []
 
 
-def test_run_live_dry_run_cycle_documents_technical_weight_zero():
-    bars_client = FakeBarsClient(bars_by_symbol={})
+def test_run_live_dry_run_cycle_uses_live_evidence_decide_kwargs_not_frozen(monkeypatch):
+    """As of the 2026-09-25 live-evidence extension, this CLI's decide_
+    kwargs come from `.362.LIVE_EVIDENCE_DECIDE_KWARGS` (technical_weight
+    = 1.0), NOT `.054.FROZEN_DECIDE_KWARGS` (technical_weight = 0.0).
+    `.054`'s own frozen constant and its own test suite are untouched --
+    this only confirms `.356` no longer reads it for this purpose."""
+    captured = {}
+    real_run_stage1a = STAGE1.run_stage1a_dry_run
+
+    def _spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_run_stage1a(*args, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1a_dry_run", _spy)
+
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": make_bars(n=60)})
     result = M.run_live_dry_run_cycle(
         (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=10),),
         bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
         lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
         max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
     )
-    assert "technical_weight_is_zero_warning" in result
+    assert captured["decide_kwargs"]["technical_weight"] == 1.0
+    assert captured["decide_kwargs"]["short_technical_weight"] == 1.0
+    assert captured["decide_kwargs"]["sentiment_weight"] == 1.0
+    assert captured["decide_kwargs"]["wave_weight"] == 1.0
+    assert captured["decide_kwargs"]["sector_rotation_weight"] == 0.0
+    assert result["decide_kwargs_source"] == "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS"
+    # .054's own frozen constant is completely untouched by this change
     assert SIGSRC.FROZEN_DECIDE_KWARGS["technical_weight"] == 0.0
     assert SIGSRC.FROZEN_DECIDE_KWARGS["short_technical_weight"] == 0.0
+
+
+def test_run_live_dry_run_cycle_without_news_client_leaves_sentiment_wave_none(monkeypatch):
+    """Backward compatibility: omitting news_client/news_state_dir (the
+    pre-extension call shape) must behave exactly as before -- sentiment_
+    regime/wave_result stay None, nothing raises."""
+    captured_args = {}
+    real_run_stage1a = STAGE1.run_stage1a_dry_run
+
+    def _spy(symbol_requests, **kwargs):
+        captured_args["symbol_requests"] = symbol_requests
+        return real_run_stage1a(symbol_requests, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1a_dry_run", _spy)
+
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": make_bars(n=60)})
+    result = M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=10),),
+        bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
+    )
+    reqs = captured_args["symbol_requests"]
+    assert len(reqs) == 1
+    assert reqs[0].sentiment_regime is None
+    assert reqs[0].wave_result is None
+    assert result["news_ingestion_status"] is None
+    assert result["sector_rotation_by_symbol"] == {}
+
+
+def test_run_live_dry_run_cycle_with_news_populates_sentiment_and_wave(monkeypatch, tmp_path):
+    captured_args = {}
+    real_run_stage1a = STAGE1.run_stage1a_dry_run
+
+    def _spy(symbol_requests, **kwargs):
+        captured_args["symbol_requests"] = symbol_requests
+        return real_run_stage1a(symbol_requests, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1a_dry_run", _spy)
+
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": make_bars(n=60)})
+    news_client = FakeNewsClient(articles=[
+        FakeArticle(id=1, headline="Acme beats estimates", symbols=["AAPL"], source="Reuters",
+                    created_at=NOW.isoformat()),
+        FakeArticle(id=2, headline="Acme guidance raised", symbols=["AAPL"], source="Bloomberg",
+                    created_at=NOW.isoformat()),
+    ])
+
+    result = M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=10),),
+        bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True,
+        news_client=news_client, news_state_dir=tmp_path / "news_state", now=NOW,
+    )
+    reqs = captured_args["symbol_requests"]
+    assert len(reqs) == 1
+    assert reqs[0].sentiment_regime is not None
+    assert reqs[0].wave_result is not None
+    assert result["news_ingestion_status"]["fetch_status"]["status"] == "SUCCESS"
+    assert result["sentiment_wave_params"] == dict(ORCH362.SENTIMENT_WAVE_PARAMS)
+    # no SPY/GLD/SLV bars supplied in this single-symbol test -> sector rotation logged as skipped
+    assert result["sector_rotation_by_symbol"]["AAPL"] is None
+    assert "AAPL" in result["live_evidence_build_errors"]
+
+
+def test_run_live_dry_run_cycle_news_failure_fails_open(tmp_path):
+    """A broken news fetch must never block the technical-only path --
+    the cycle still runs, sentiment/wave simply stay unavailable for this
+    cycle, mirroring every other fail-open discipline in this module."""
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": make_bars(n=60)})
+    news_client = FakeNewsClient(raise_exc=RuntimeError("network down"))
+    news_state_dir = tmp_path / "news_state"
+
+    result = M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=10),),
+        bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True,
+        news_client=news_client, news_state_dir=news_state_dir, now=NOW,
+    )
+    assert result["news_ingestion_status"]["fetch_status"]["status"] == "FAILED"
+    assert result["stage1_report"] is not None  # cycle still ran
 
 
 def test_run_live_dry_run_cycle_preserves_44_enforcement_wiring(monkeypatch):
