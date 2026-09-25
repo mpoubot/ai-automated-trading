@@ -51,3 +51,7 @@ reports/
 
 # AI agent tool-state cache (not part of the app)
 .claude-flow/
+
+aura-autonomous-trading-agent/stage3_scheduled_output/
+aura-autonomous-trading-agent/stage3c_output/
+aura-autonomous-trading-agent/stage3c_*.json
