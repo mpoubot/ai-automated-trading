@@ -172,10 +172,104 @@ were confirmed via `AskUserQuestion` before any code was written:
   `.336`/`.338`/`.352`/`.355` clock-drift failures as before. No new
   regressions.
 
-## 7. What this does NOT yet do
+## 7. Addendum — manual-trigger CLI for a capped real paper submission (same date)
 
-A manual-trigger path for `run_stage1b_paper_cycle` (an actual capped
-paper order — 1-2 symbols, `max_new_orders_per_cycle=1`) does not exist
-yet and was not built or attempted this session. No git commit or push
-has been made for the position-sizing work — per standing instruction,
-that requires Martin's explicit go-ahead.
+Following "continue to task #137," scoping continued with two more
+`AskUserQuestion` rounds before any code was written.
+
+**Round 1 — architecture and gates.** `.356` has a standing, AST-test-proven
+guarantee: it never calls `run_stage1b_paper_cycle` and never passes
+`attempt_submission=True`. Rather than weaken that guarantee, the capped
+real-submission path was built as its own new module,
+`aura_v05363_stage1b_manual_trigger_cli.py` — `.356` is completely
+unmodified by this addendum. Martin also confirmed: (a) an explicit,
+hard-to-mistype `--i-confirm-this-submits-real-paper-orders` flag is
+REQUIRED before `.363` will open `.36`'s auth gates or `.38`'s supervisor
+kill switch — there is no way to pass it as "false," only to omit it and
+have the CLI refuse to run; (b) scope (which symbols, how many orders) is
+controlled entirely via `--requests-config` and
+`--max-new-orders-per-cycle`, with no additional code-level symbol
+allowlist or ceiling invented on top of that.
+
+**A second gap found mid-build, also surfaced before continuing.** `.44`'s
+daily_loss check BLOCKs unconditionally (`INSUFFICIENT_HISTORY`) whenever
+there's no real same-day-prior equity snapshot — and nothing in this repo
+persisted one anywhere before this addendum. An empty `equity_history`
+(matching `.356`'s own harmless choice, safe there only because `.356`
+never submits) would have meant `.363`'s real submissions BLOCK on
+daily_loss alone, every single time, regardless of decision quality or
+confirmation. Martin chose building a small persisted log over the two
+lighter alternatives (self-seeding a same-run-only baseline, or shipping
+`.363` permanently blocked pending a future fix).
+
+### What was built
+
+- **`aura_v05364_equity_history_log.py`** (new) — a small append-only
+  JSON-Lines log for real ALPACA equity observations, deliberately
+  mirroring `.361`'s enforcement-journal format/conventions rather than
+  inventing a new one. Default path
+  `regime_output/equity_history_log/alpaca_equity_history.jsonl`, following
+  the same `regime_output/` root `.338` already uses. Every observation is
+  a real, freshly-fetched `get_account().equity` value — this module never
+  fabricates, estimates, or backfills a number.
+- **`aura_v05363_stage1b_manual_trigger_cli.py`** (new) — reuses `.356`'s
+  already-tested credential/client/evidence/sizing functions directly (no
+  duplicated logic, only new sequencing), then calls `.55`'s EXISTING
+  `run_stage1b_paper_cycle()`. Before calling it: appends this run's real
+  equity to `.364`'s log, reads the full same-day history back, and passes
+  that as `equity_history` — the first-ever observation in a day becomes
+  its own zero-loss baseline (a real number, not fabricated); every later
+  same-day run sees a genuine, strictly-earlier prior observation.
+  `strategy_id`/`strategy_version` default to honestly-labeled values
+  (`STAGE1B_MANUAL_TRIGGER_LIVE_PAPER` / `v1-manual-trigger`), not `.355`'s
+  own `STAGE1_SYNTHETIC_SCENARIO` default (which would mislabel a real
+  paper fill's audit trail). `limits=None` (→ `.355` defaults to
+  `PortfolioLimits()`, unconfigured — Martin's standing choice).
+- A bug caught and fixed before it shipped: my first draft omitted
+  `technical_regime`/`short_technical_regime` from the `SymbolRequest` it
+  builds — inconsistent with `.356`'s own construction and would have
+  silently dropped real technical evidence from the decision despite
+  `LIVE_EVIDENCE_DECIDE_KWARGS` weighting it at 1.0. Caught by re-reading
+  `.356`'s equivalent code side by side before writing tests, fixed before
+  any test ran.
+
+### Test coverage and verification
+
+- `tests/test_aura_v05364_equity_history_log.py` — new, 12 tests: append/
+  read round-trip, append-only (never truncates), missing-file-is-not-an-
+  error, corrupt-line-is-fail-closed, and the accumulate-across-calls
+  behavior the daily-loss fix depends on.
+- `tests/test_aura_v05363_stage1b_manual_trigger_cli.py` — new, 9 tests:
+  the confirmation gate (direct call and CLI argparse), the exact
+  supervision dict shape, a spy proving `run_stage1b_paper_cycle` (never
+  `run_stage1a_dry_run`) is called only when confirmed, a genuine
+  end-to-end test where a real order is actually submitted (a synthetic
+  strongly-bullish technical regime is substituted for `.51`'s own
+  indicator math, which is already covered by `.51`'s own test suite — this
+  file's job is proving the WIRING, not re-proving `.51`'s scoring), a
+  second-same-day-run test proving cumulative daily-loss history works,
+  and two fail-open-per-symbol tests (a fetch failure, an unsizeable
+  symbol) that skip only that symbol without blocking the cycle.
+- One cross-file test-isolation bug was found and fixed while combining
+  this file with `.356`'s: both test files reload the same canonical
+  module names (e.g. `.355`) into `sys.modules`, and `.356`'s existing
+  spy-based tests broke when my file's load ran after `.356`'s in the same
+  pytest session, because production code re-resolves those names via
+  `__import__` at call time. Fixed by making both new test files' loaders
+  idempotent (reuse an already-registered module instead of overwriting
+  it) — a test-hygiene fix confined to the two new test files, nothing
+  produced by any prior session's test file was touched.
+- **Full suite:** 1301 passed, 10 failed — the same pre-existing
+  `.336`/`.338`/`.352`/`.355` clock-drift failures already documented,
+  confirmed stable across two consecutive runs. One additional flaky
+  concurrency test failed once, then passed both in isolation and on a
+  full re-run — not a regression.
+
+## 8. What this does NOT yet do
+
+No git commit or push has been made for the manual-trigger CLI work — per
+standing instruction, that requires Martin's explicit go-ahead. No real
+(or paper) order has been submitted by anything built this session; `.363`
+exists and is tested against fakes only. Per task #139, Martin's explicit
+sign-off is still required before the very first real invocation of
+`.363` against a live Alpaca paper account.
