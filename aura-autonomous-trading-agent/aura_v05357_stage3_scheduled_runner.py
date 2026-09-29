@@ -262,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--scan-pinned-universe", action="store_true",
                          help="Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): instead of a "
                               "hand-written requests-config file, scan every symbol in .51's existing pinned "
-                              "universe (aura_v05351_equity_universe_v1.json, 27 symbols) every cycle -- "
+                              "universe (aura_v05351_equity_universe_v1.json, 39 symbols as of the "
+                              "2026-09-29 ETF curation pass) every cycle -- "
                               "quantity always auto-sized. Exactly one of --requests-config or "
                               "--scan-pinned-universe is required.")
     parser.add_argument("--max-new-orders-per-cycle", required=True, type=int)

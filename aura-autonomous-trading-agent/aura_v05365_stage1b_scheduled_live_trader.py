@@ -485,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                          help="JSON file: list of {symbol, asset_class, quantity}. Same format as .356/.363. "
                               "Exactly one of --requests-config or --scan-pinned-universe is required.")
     parser.add_argument("--scan-pinned-universe", action="store_true",
-                         help="Scan every symbol in .51's existing pinned universe (27 symbols) every cycle -- "
+                         help="Scan every symbol in .51's existing pinned universe (39 symbols as of the "
+                              "2026-09-29 ETF curation pass) every cycle -- "
                               "quantity always auto-sized. Exactly one of --requests-config or "
                               "--scan-pinned-universe is required.")
     parser.add_argument("--max-new-orders-per-cycle", type=int, default=DEFAULT_MAX_NEW_ORDERS_PER_CYCLE,

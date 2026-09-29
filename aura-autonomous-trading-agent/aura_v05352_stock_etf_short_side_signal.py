@@ -171,8 +171,11 @@ established precedent to follow)
      existing gate, which Martin's "do not redesign completed milestones"
      and ".44 already owns portfolio-wide arbitration, don't duplicate it"
      precedents (from `.50`'s own docstring) both argue against.
-  3. **Universe scope: reuse `.51`'s exact same 27-symbol pinned universe
-     verbatim, same JSON file, same loader.** No new universe file. A
+  3. **Universe scope: reuse `.51`'s exact same pinned universe verbatim
+     (27 symbols at this module's original build; extended to 39 in the
+     2026-09-29 ETF curation pass -- see `aura_v05351_equity_universe_v1.
+     json`'s own `"source"` field for the current, authoritative count),
+     same JSON file, same loader.** No new universe file. A
      shortability-filtered subset would require this module to duplicate
      `.33`-`.38`'s own shortability knowledge (or invent a new one) --
      directly conflicting with decision 2 above. `.52` evaluates the full

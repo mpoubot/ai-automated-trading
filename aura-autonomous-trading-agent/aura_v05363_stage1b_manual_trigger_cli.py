@@ -477,7 +477,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--scan-pinned-universe", action="store_true",
                          help="Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): instead of a "
                               "hand-written requests-config file, consider every symbol in .51's existing "
-                              "pinned universe (aura_v05351_equity_universe_v1.json, 27 symbols) as this "
+                              "pinned universe (aura_v05351_equity_universe_v1.json, 39 symbols as of the "
+                              "2026-09-29 ETF curation pass) as this "
                               "cycle's candidate pool -- quantity always auto-sized. --max-new-orders-per-cycle "
                               "still caps how many of them can actually result in a real order, via .53's "
                               "existing ranking (unchanged). Exactly one of --requests-config or "

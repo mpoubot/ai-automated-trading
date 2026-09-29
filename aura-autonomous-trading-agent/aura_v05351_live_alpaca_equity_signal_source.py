@@ -129,6 +129,18 @@ implemented
      UNIVERSE, not a claim that any symbol here is validated for live
      trading (matching the disclosed-limitation pattern `.42`/`.43`
      already use for their own frozen candidates).
+
+     Extension -- 2026-09-29 (Martin, AskUserQuestion): the pinned
+     universe was grown from v1 (27 symbols, this audit's finding) to
+     v2 (39 symbols) by adding DIA plus all 11 SPDR sector ETFs, per
+     the ETF curation scope in
+     `AURA_Options_ETF_Expansion_Scoping_2026-09-24.md`. The historical
+     narrative above describes what was true when `.51` was first
+     built and is left unchanged; the current symbol count and full
+     disclosure of the v2 addition live in
+     `aura_v05351_equity_universe_v1.json`'s own `"source"` field,
+     which this module always loads live -- nothing here is stale in
+     behavior, only in this narrative paragraph's stated count.
   4. **Architecture: narrowly scoped, no `.39`/`.44`/`.50`/roadmap
      redesign.** `.50`'s change is the single small additive extension
      described below; `.39` and `.44` are untouched; nothing here alters

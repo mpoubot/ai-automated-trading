@@ -556,8 +556,8 @@ def test_main_scan_pinned_universe_builds_symbol_requests_from_real_51_universe(
     pinned_version = technical_module.load_pinned_universe().version
     symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
 
-    assert len(symbol_requests) == 27
-    assert symbol_source == "scan_pinned_universe:v1:27_symbols"
+    assert len(symbol_requests) == 39
+    assert symbol_source == "scan_pinned_universe:v2:39_symbols"
     assert all(r.quantity is None for r in symbol_requests)  # always auto-sized, same as .356/.357
 
 

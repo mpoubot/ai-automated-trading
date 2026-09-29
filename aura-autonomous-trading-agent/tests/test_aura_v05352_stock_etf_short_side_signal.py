@@ -630,8 +630,8 @@ def test_51_own_behavior_fully_preserved_when_52_absent():
 def test_short_signal_reuses_51_pinned_universe_directly():
     m51 = M.load_equity_signal_module()
     universe = m51.load_pinned_universe()
-    assert universe.version == "v1"
-    assert len(universe.symbols) == 27
+    assert universe.version == "v2"
+    assert len(universe.symbols) == 39
     for expected in ("AAPL", "MSFT", "SPY", "QQQ"):
         assert expected in universe.symbols
     # `.52` defines no universe-loading function of its own.

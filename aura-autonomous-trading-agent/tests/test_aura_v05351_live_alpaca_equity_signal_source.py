@@ -504,10 +504,22 @@ def test_50_build_candidate_evidence_unaffected_when_technical_absent():
 
 def test_load_pinned_universe_from_real_config_file():
     universe = M.load_pinned_universe()
-    assert universe.version == "v1"
-    assert len(universe.symbols) == 27
-    assert len(set(universe.symbols)) == 27  # no duplicates
+    assert universe.version == "v2"
+    assert len(universe.symbols) == 39
+    assert len(set(universe.symbols)) == 39  # no duplicates
     for expected in ("AAPL", "MSFT", "SPY", "QQQ", "GLD", "SLV"):
+        assert expected in universe.symbols
+
+
+def test_load_pinned_universe_includes_2026_09_29_etf_curation_additions():
+    # Extension -- 2026-09-29 (Martin, AskUserQuestion): universe v2 added
+    # DIA plus all 11 SPDR sector ETFs. See aura_v05351_equity_universe_v1.
+    # json's own "source" field for the full disclosure of this addition.
+    universe = M.load_pinned_universe()
+    for expected in (
+        "DIA",
+        "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLRE", "XLU", "XLC",
+    ):
         assert expected in universe.symbols
 
 

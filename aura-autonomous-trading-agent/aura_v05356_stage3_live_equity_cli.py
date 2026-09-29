@@ -201,7 +201,15 @@ REQUIRED_ASSET_CLASSES = frozenset({"STOCK", "ETF"})
 # file is a stock. This is read directly off the pinned universe's own current
 # contents, not invented; if the universe file's symbol list changes, this set
 # needs a matching update (see build_symbol_requests_from_pinned_universe).
-KNOWN_ETF_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "GLD", "SLV"})
+#
+# Extension -- 2026-09-29 (Martin, AskUserQuestion): universe v2 added DIA
+# plus all 11 SPDR sector ETFs -- see aura_v05351_equity_universe_v1.json's
+# own "source" field for the full disclosure of this addition.
+KNOWN_ETF_SYMBOLS = frozenset({
+    "SPY", "QQQ", "IWM", "GLD", "SLV",
+    "DIA",
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLRE", "XLU", "XLC",
+})
 
 
 class Stage3CliError(Exception):
@@ -393,9 +401,12 @@ def build_symbol_requests_from_pinned_universe(
 ) -> tuple[LiveSymbolRequest, ...]:
     """Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): builds
     one LiveSymbolRequest per symbol in .51's existing pinned research
-    universe (aura_v05351_equity_universe_v1.json) -- the same 27-symbol
-    list already used elsewhere in this repo for signal generation, not an
-    invented new universe. .51's own docstring is explicit that this is a
+    universe (aura_v05351_equity_universe_v1.json) -- the same symbol
+    list already used elsewhere in this repo for signal generation (27
+    symbols as of v1; 39 as of the same-day v2 ETF curation extension --
+    see that JSON file's own "source" field for the current, authoritative
+    count), not an invented new universe. .51's own docstring is explicit
+    that this is a
     "research starting universe, not a live-trading validation claim" --
     that caveat still applies here; scanning it does not mean every symbol
     in it is validated for live trading, only that it's the one already-

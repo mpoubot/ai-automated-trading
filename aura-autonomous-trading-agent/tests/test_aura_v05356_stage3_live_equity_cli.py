@@ -889,13 +889,17 @@ def test_build_symbol_requests_from_pinned_universe_matches_pinned_json():
     reqs = M.build_symbol_requests_from_pinned_universe(M51)
     pinned = M51.load_pinned_universe()
 
-    assert len(reqs) == len(pinned.symbols) == 27
+    assert len(reqs) == len(pinned.symbols) == 39
     assert tuple(r.symbol for r in reqs) == pinned.symbols
     assert all(r.quantity is None for r in reqs)
 
     etfs = {r.symbol for r in reqs if r.asset_class == "ETF"}
     stocks = {r.symbol for r in reqs if r.asset_class == "STOCK"}
-    assert etfs == {"SPY", "QQQ", "IWM", "GLD", "SLV"}
+    assert etfs == {
+        "SPY", "QQQ", "IWM", "GLD", "SLV",
+        "DIA",
+        "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLRE", "XLU", "XLC",
+    }
     assert stocks == set(pinned.symbols) - etfs
     assert len(stocks) == 22
 
@@ -932,13 +936,13 @@ def test_run_live_dry_run_cycle_scan_pinned_universe_symbol_source_propagates():
         max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
         symbol_source=f"scan_pinned_universe:{pinned.version}:{len(symbol_requests)}_symbols",
     )
-    assert result["symbol_source"] == f"scan_pinned_universe:v1:27_symbols"
+    assert result["symbol_source"] == f"scan_pinned_universe:v2:39_symbols"
     # skip_account_equity_fetch=True -> every symbol is unsizeable (no
-    # explicit quantity, no equity to auto-size from) -- confirms all 27
+    # explicit quantity, no equity to auto-size from) -- confirms all 39
     # were actually evaluated (evidence fetched, sizing attempted), not
-    # silently truncated somewhere, without needing to fake 27 accounts'
+    # silently truncated somewhere, without needing to fake 39 accounts'
     # worth of ATR sizing math just to prove the wiring works.
-    assert len(result["sizing_failures"]) == 27
+    assert len(result["sizing_failures"]) == 39
     assert result["stage1_report"] is None
 
 
@@ -984,7 +988,7 @@ def test_main_scan_pinned_universe_end_to_end(tmp_path, monkeypatch, capsys):
     ])
     assert rc == 0
     written = json.loads(out.read_text())
-    assert written["symbol_source"] == f"scan_pinned_universe:{pinned.version}:27_symbols"
-    # All 27 symbols were actually fetched against the fake bars client --
+    assert written["symbol_source"] == f"scan_pinned_universe:{pinned.version}:39_symbols"
+    # All 39 symbols were actually fetched against the fake bars client --
     # not just the ones a hand-written requests-config would have named.
-    assert len(bars_client.requests) == 27
+    assert len(bars_client.requests) == 39
