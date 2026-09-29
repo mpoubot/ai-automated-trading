@@ -281,6 +281,45 @@ def test_main_without_confirm_flag_exits_before_running(tmp_path, monkeypatch):
 
 
 # ============================================================================
+# 1b. --scan-pinned-universe -- exactly-one-of validation (Martin,
+#     AskUserQuestion, 2026-09-29). Must fail closed BEFORE any credential
+#     load or client construction, same as the confirm-flag gate above.
+# ============================================================================
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_neither_given(tmp_path, capsys):
+    output_path = tmp_path / "out.json"
+    argv = [
+        "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300", "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1", "--output", str(output_path),
+        "--i-confirm-this-submits-real-paper-orders",
+    ]
+    rc = M.main(argv)
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert not output_path.exists()
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_both_given(tmp_path, capsys):
+    reqs_path = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}])
+    output_path = tmp_path / "out.json"
+    argv = [
+        "--requests-config", str(reqs_path), "--scan-pinned-universe",
+        "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300", "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1", "--output", str(output_path),
+        "--i-confirm-this-submits-real-paper-orders",
+    ]
+    rc = M.main(argv)
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert not output_path.exists()
+
+
+# ============================================================================
 # 2. build_live_paper_submission_supervision
 # ============================================================================
 
@@ -470,6 +509,56 @@ def test_unsizeable_symbol_skipped_not_whole_cycle_blocked():
     assert result["sizing_failures"][0]["error"] == "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
     assert result["stage1_report"] is None
     assert result["equity_history_observation_count"] == 0
+
+
+# ============================================================================
+# 4b. symbol_source -- audit field (Martin, AskUserQuestion, 2026-09-29).
+#     Uses the same cheap "no bars for AAPL" fixture as the fetch-failure
+#     test above -- no real submission is attempted, only the tagging on
+#     the returned dict is under test here.
+# ============================================================================
+
+
+def test_symbol_source_defaults_to_requests_config():
+    bars_client = FakeBarsClient(bars_by_symbol={})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW,
+    )
+    assert result["symbol_source"] == "requests_config"
+
+
+def test_symbol_source_override_is_threaded_into_result():
+    bars_client = FakeBarsClient(bars_by_symbol={})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW, symbol_source="scan_pinned_universe:v1:27_symbols",
+    )
+    assert result["symbol_source"] == "scan_pinned_universe:v1:27_symbols"
+
+
+def test_main_scan_pinned_universe_builds_symbol_requests_from_real_51_universe():
+    """Wiring-only check that `.363`'s CLI branch calls the SAME already-
+    tested `.356.build_symbol_requests_from_pinned_universe` -- not a
+    reimplementation. Exercises the real `.51`/`.356` functions directly
+    (no fakes needed, no network -- `load_pinned_universe()` just reads
+    the pinned JSON file on disk)."""
+    technical_module = EQUITY_CLI.load_technical_module()
+    symbol_requests = EQUITY_CLI.build_symbol_requests_from_pinned_universe(technical_module)
+    pinned_version = technical_module.load_pinned_universe().version
+    symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
+
+    assert len(symbol_requests) == 27
+    assert symbol_source == "scan_pinned_universe:v1:27_symbols"
+    assert all(r.quantity is None for r in symbol_requests)  # always auto-sized, same as .356/.357
 
 
 # ============================================================================

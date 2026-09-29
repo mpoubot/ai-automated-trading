@@ -115,6 +115,32 @@ module does not decide when it is appropriate to actually run a live
 submission -- that remains a separate, explicit go/no-go Martin makes
 each time he chooses to invoke it (see task #139: a completion report
 and explicit sign-off precede the first real invocation).
+
+Extension -- 2026-09-29, wide scan against the pinned universe (Martin,
+AskUserQuestion)
+------------------------------------------------------------------------
+`.356`/`.357` gained a `--scan-pinned-universe` mode that builds one
+symbol request per symbol in `.51`'s pinned research universe (27
+symbols) instead of reading a hand-written `--requests-config` file.
+This module now exposes the SAME choice, reusing `.356`'s already-tested
+`build_symbol_requests_from_pinned_universe()` verbatim -- no new
+symbol-list logic is written here. Exactly one of `--requests-config` /
+`--scan-pinned-universe` is required, same fail-closed validation as
+`.356`/`.357`.
+
+This does NOT loosen any of the three structural safety gates above:
+`--i-confirm-this-submits-real-paper-orders` is still required,
+`max_new_orders_per_cycle` still caps how many of the scanned symbols
+can actually result in a real order (via `.53`'s existing rank-by-
+|final_rank_score| cap-selection, unchanged), and every symbol still
+goes through the same evidence/sizing/enforcement pipeline as before.
+What changes is only the size of the CANDIDATE pool `.53` ranks from --
+Martin's own documented plan for a first run (1-2 hand-picked symbols)
+remains fully available via `--requests-config`; `--scan-pinned-universe`
+is an explicit, separate choice for when he wants the real-order path to
+consider the full pinned universe rather than a curated list. The
+resulting `symbol_source` field on the output records which mode
+produced a given run, for audit.
 """
 from __future__ import annotations
 
@@ -239,6 +265,7 @@ def run_manual_trigger_stage1b_cycle(
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
     equity_history_log_path: Path | None = None,
     now: datetime | None = None,
+    symbol_source: str = "requests_config",
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -383,6 +410,7 @@ def run_manual_trigger_stage1b_cycle(
         "version": VERSION,
         "observed_at": _now_iso(now_dt),
         "confirmed_real_submission": True,
+        "symbol_source": symbol_source,
         "universe_version": universe_version,
         "lookback_bars": lookback_bars,
         "decide_kwargs_source": "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS",
@@ -423,9 +451,18 @@ def run_manual_trigger_stage1b_cycle(
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiring, exercised via unit tests on its pieces, not this shell
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--requests-config", required=True, type=Path,
+    parser.add_argument("--requests-config", required=False, default=None, type=Path,
                          help="JSON file: list of {symbol, asset_class, quantity}. No default universe. "
-                              "For a first run, Martin's own plan is 1-2 symbols here.")
+                              "For a first run, Martin's own plan is 1-2 symbols here. Exactly one of "
+                              "--requests-config or --scan-pinned-universe is required.")
+    parser.add_argument("--scan-pinned-universe", action="store_true",
+                         help="Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): instead of a "
+                              "hand-written requests-config file, consider every symbol in .51's existing "
+                              "pinned universe (aura_v05351_equity_universe_v1.json, 27 symbols) as this "
+                              "cycle's candidate pool -- quantity always auto-sized. --max-new-orders-per-cycle "
+                              "still caps how many of them can actually result in a real order, via .53's "
+                              "existing ranking (unchanged). Exactly one of --requests-config or "
+                              "--scan-pinned-universe is required.")
     parser.add_argument("--max-new-orders-per-cycle", required=True, type=int,
                          help="Martin's own plan for the first run is 1. Not restricted further by this CLI "
                               "(see module docstring -- scope is controlled via --requests-config, not a "
@@ -457,6 +494,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
 
+    if bool(args.requests_config) == bool(args.scan_pinned_universe):
+        print(
+            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         equity_cli = load_equity_cli_module()
         api_key, secret_key = equity_cli.load_equity_paper_credentials()
@@ -467,7 +511,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         alpaca_client = equity_cli.build_trading_client(api_key, secret_key)
         news_client = equity_cli.build_news_client(api_key, secret_key) if args.news_state_dir is not None else None
 
-        symbol_requests = equity_cli.load_symbol_requests(args.requests_config)
+        if args.scan_pinned_universe:
+            symbol_requests = equity_cli.build_symbol_requests_from_pinned_universe(technical_module)
+            pinned_version = technical_module.load_pinned_universe().version
+            symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
+        else:
+            symbol_requests = equity_cli.load_symbol_requests(args.requests_config)
+            symbol_source = f"requests_config:{args.requests_config}"
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
         universe_version = args.universe_version or signal_source_module.UNIVERSE_VERSION
 
@@ -480,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             news_client=news_client, news_state_dir=args.news_state_dir, news_fetch_limit=args.news_fetch_limit,
             strategy_id=args.strategy_id, strategy_version=args.strategy_version,
             equity_history_log_path=args.equity_history_log_path,
+            symbol_source=symbol_source,
         )
     except Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
