@@ -36,6 +36,7 @@ injected fake.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 
@@ -814,12 +815,23 @@ def test_alpaca_claim_store_unreachable_pass_through(tmp_path, monkeypatch) -> N
     ALREADY_CONSUMED and REJECTED) -- verified via a monkeypatch of the
     SAME cached .36 module object this module dynamically imports, since
     reliably forcing a real OSError from the claims store is not possible
-    running as root in this environment (permission checks are bypassed)."""
+    running as root in this environment (permission checks are bypassed).
+
+    Patched through `sys.modules`, not this file's own `ALPACA_AUTH`
+    binding: `.36` is one of several modules `.55`'s own test file
+    deliberately re-registers into `sys.modules` under its canonical name
+    at ITS collection time (see that file's own header comment), so in a
+    full-suite run `ALPACA_AUTH` here can end up bound to an
+    already-superseded module object while `SUP.supervise_alpaca_equity_
+    execution()`'s own internal `_load_module(...)` re-fetches fresh from
+    `sys.modules` at call time -- patching `ALPACA_AUTH` directly would
+    then silently miss."""
     d = Dirs(tmp_path)
     spec = make_alpaca_spec(direction="OPEN_LONG", symbol="AAPL", decision_id="DEC-A-STOREUNREACH")
     asset = make_alpaca_asset(symbol="AAPL")
 
-    original = ALPACA_AUTH.authorized_order_request
+    alpaca_auth_module = sys.modules["aura_v05336_alpaca_equity_execution_authorization"]
+    original = alpaca_auth_module.authorized_order_request
 
     def fake_authorized_order_request(record, *args, **kwargs):
         return {
@@ -827,12 +839,12 @@ def test_alpaca_claim_store_unreachable_pass_through(tmp_path, monkeypatch) -> N
             "reason": "CLAIM_STORE_UNREACHABLE", "detail": None, "order_spec": None, "alpaca_order_request": None,
         }
 
-    monkeypatch.setattr(ALPACA_AUTH, "authorized_order_request", fake_authorized_order_request)
+    monkeypatch.setattr(alpaca_auth_module, "authorized_order_request", fake_authorized_order_request)
     try:
         r = SUP.supervise_alpaca_equity_execution(spec, asset, auth_config=alpaca_auth_config(),
                                                     supervisor_config=sup_open(), **d.alpaca_kwargs())
     finally:
-        monkeypatch.setattr(ALPACA_AUTH, "authorized_order_request", original)
+        monkeypatch.setattr(alpaca_auth_module, "authorized_order_request", original)
 
     expect("31: CLAIM_STORE_UNREACHABLE is passed through, not conflated with ALREADY_CONSUMED",
            r["status"] == "BLOCKED" and r["stage"] == "REPLAY_PROTECTION" and r["reason"] == "CLAIM_STORE_UNREACHABLE")

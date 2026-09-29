@@ -29,6 +29,7 @@ anywhere in this file.
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
 
 import aura_v05333_canonical_execution_specification as CANON
@@ -369,7 +370,20 @@ def test_position_intent_modification_rejection(tmp_path, monkeypatch) -> None:
     expect("baseline authorized", record["status"] == "AUTHORIZED")
     expect("baseline position_intent buy_to_open", record["position_intent"] == "buy_to_open")
 
-    monkeypatch.setitem(ADAPTER.DIRECTION_TO_SIDE_POSITION_INTENT_STR, "OPEN_LONG", ("buy", "buy_to_close"))
+    # Patches whatever module object is CURRENTLY registered under .35's
+    # canonical sys.modules name, not this file's own `ADAPTER` binding --
+    # when the full suite runs, a later-collected test file (e.g. `.55`'s,
+    # which deliberately re-registers `.35` into sys.modules under this
+    # same canonical name so ITS OWN dynamic imports stay consistent) can
+    # leave `ADAPTER` here pointing at a stale, already-replaced module
+    # object, while `AUTH.revalidate_before_submission()`'s own internal
+    # `_load_adapter_module()` always re-fetches fresh from sys.modules at
+    # call time -- so mutating `ADAPTER` directly can silently patch a
+    # dict AUTH never reads. Going through sys.modules here guarantees
+    # this monkeypatch and AUTH's own lookup, moments later in this same
+    # test, see the identical object.
+    adapter_module = sys.modules["aura_v05335_alpaca_equity_execution_adapter"]
+    monkeypatch.setitem(adapter_module.DIRECTION_TO_SIDE_POSITION_INTENT_STR, "OPEN_LONG", ("buy", "buy_to_close"))
     result = AUTH.revalidate_before_submission(record, spec, asset, config=authorized_config(), claims_dir=claims(tmp_path))
     expect("position_intent drift rejected", result["status"] == "AUTHORIZATION_REJECTED")
     expect("position_intent drift -> POSITION_INTENT_MISMATCH", result["reason"] == "POSITION_INTENT_MISMATCH")

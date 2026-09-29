@@ -489,9 +489,19 @@ def test_short_technical_regime_status_vocabulary_reused_from_51_not_redefined()
     vocabulary is real, not just asserted in the docstring: `.52` uses the
     exact same frozenset objects `.51` defines, not a re-declared copy
     that could silently drift.
+
+    Compares against `.51` fetched FRESH from `sys.modules`, not this
+    file's own collection-time `M51` binding: another test file collected
+    later (e.g. `.56`'s, which also `_load()`s and re-registers `.51`
+    under its canonical sys.modules name) can leave `M51` here pointing at
+    an already-superseded module object in a full-suite run, while
+    `M.load_equity_signal_module()` always re-fetches fresh at call time
+    -- comparing against the stale binding would flag a real,
+    content-identical reuse as a false drift.
     """
-    assert M51.TECHNICAL_STATUSES is M.load_equity_signal_module().TECHNICAL_STATUSES
-    assert M51.USABLE_TECHNICAL_STATUSES is M.load_equity_signal_module().USABLE_TECHNICAL_STATUSES
+    m51_current = sys.modules["aura_v05351_live_alpaca_equity_signal_source"]
+    assert m51_current.TECHNICAL_STATUSES is M.load_equity_signal_module().TECHNICAL_STATUSES
+    assert m51_current.USABLE_TECHNICAL_STATUSES is M.load_equity_signal_module().USABLE_TECHNICAL_STATUSES
 
 
 # ============================================================================

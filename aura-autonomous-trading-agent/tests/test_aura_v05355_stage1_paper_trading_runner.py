@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -117,7 +117,20 @@ def equity_history_fixture():
     # discipline) blocks every hypothetical trade regardless of any other
     # dimension. Seeding this is a test-fixture concern, not something
     # `.55` fabricates on a caller's behalf.
-    return [{"venue": "ALPACA", "equity": 100000.0, "as_of": "2026-09-23T08:00:00+00:00"}]
+    #
+    # Anchored to the REAL current time (not a fixed calendar date) --
+    # `.55`'s `run_stage1a_dry_run`/`run_stage1b_paper_cycle` deliberately
+    # capture their own fresh, real `datetime.now(timezone.utc)` for the
+    # enforcement freshness/daily-loss-day-key check regardless of any
+    # caller-supplied `now` (see `run_stage1b_paper_cycle`'s own docstring
+    # comment on `enforcement_now`), so a fixture pinned to a fixed past
+    # date drifts out of "today" and starts failing closed with
+    # INSUFFICIENT_HISTORY purely because real wall-clock time moved on --
+    # not because of any actual behavior change. A fixed offset (1 hour)
+    # keeps this safely same-calendar-day except right at a UTC midnight
+    # boundary.
+    real_now = datetime.now(timezone.utc)
+    return [{"venue": "ALPACA", "equity": 100000.0, "as_of": (real_now - timedelta(hours=1)).isoformat()}]
 
 
 class FakeAsset:
@@ -568,10 +581,16 @@ def test_stage1b_resulting_position_logged_after_submission(tmp_path):
 def test_enforcement_check_fn_allows_when_no_limits_configured():
     client = FakeAlpacaClient()
     snapshot = OBS.build_portfolio_snapshot(alpaca_client=client)
+    # Captured AFTER the snapshot, not the fixed `NOW` -- build_portfolio_snapshot()
+    # always stamps its own fresh, real wall-clock `as_of`, so a fixed/earlier `now`
+    # would trip .44's unconditional SNAPSHOT_TIMESTAMP_IN_FUTURE check the same way
+    # `run_stage1b_paper_cycle` avoids it internally (see `equity_history_fixture`'s
+    # own comment on why real wall-clock time, not a fixed date, is used here).
+    enforcement_now = datetime.now(timezone.utc)
     decisions: dict = {}
     check = M.build_enforcement_check_fn(
         snapshot=snapshot, equity_history=equity_history_fixture(), limits=ENFORCE.PortfolioLimits(),
-        max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn, now=NOW,
+        max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn, now=enforcement_now,
         decisions_by_symbol=decisions, enforcement_module=ENFORCE, observability_module=OBS,
     )
     result = check("AAPL", "OPEN_LONG", "10", None)
@@ -599,21 +618,6 @@ def test_enforcement_check_fn_rejects_bad_quantity():
 # ============================================================================
 
 from datetime import date as _date  # noqa: E402 -- local, test-only import kept near its first use
-from datetime import timedelta as _timedelta  # noqa: E402
-
-
-def _fresh_equity_history_fixture():
-    """Unlike the shared `equity_history_fixture()` above (hardcoded to a
-    fixed 2026-09-23 date, which `.44`'s daily_loss dimension increasingly
-    rejects as INSUFFICIENT_HISTORY the further real wall-clock time drifts
-    past it -- `run_stage1b_paper_cycle` always captures its OWN real,
-    fresh `datetime.now(timezone.utc)` for the enforcement freshness/
-    daily-loss-day-key check, regardless of any caller-supplied `now`; see
-    that function's own docstring), this fixture is anchored to the REAL
-    current time so these earnings-blackout wiring tests stay valid
-    whenever they are actually run, not just on the day they were written."""
-    real_now = datetime.now(timezone.utc)
-    return [{"venue": "ALPACA", "equity": 100000.0, "as_of": (real_now - _timedelta(hours=1)).isoformat()}]
 
 
 class FakeEarningsCalendarState:
@@ -633,7 +637,7 @@ def test_stage1b_earnings_calendar_ok_no_blackout_still_submits(tmp_path):
     calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 10, 1),)})  # not today
     report = M.run_stage1b_paper_cycle(
         reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
-        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
         supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-ok"),
         fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
         earnings_calendar_state=calendar_state,
@@ -649,7 +653,7 @@ def test_stage1b_earnings_blackout_blocks_new_entry_not_submitted(tmp_path):
     calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 9, 23),)})  # today
     report = M.run_stage1b_paper_cycle(
         reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
-        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
         supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-blackout"),
         fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
         earnings_calendar_state=calendar_state,
@@ -688,7 +692,7 @@ def test_stage1b_earnings_calendar_state_none_reproduces_original_behavior(tmp_p
     reqs = (make_request("AAPL", promotable_score=0.9),)
     report = M.run_stage1b_paper_cycle(
         reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
-        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
         supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-none"),
         fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
         # earnings_calendar_state omitted -- defaults to None
