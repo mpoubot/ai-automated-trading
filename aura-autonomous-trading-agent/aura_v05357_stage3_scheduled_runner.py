@@ -35,6 +35,21 @@ Scope
 ------------------------------------------------------------------------
 Equity/ETF only, Alpaca only, preview-only. Track A/MEXC is not
 imported, referenced, or touched anywhere in this module.
+
+Extension -- 2026-09-29, wide scan against the pinned universe (Martin,
+AskUserQuestion)
+------------------------------------------------------------------------
+`.56` gained a `--scan-pinned-universe` mode (2026-09-29) that builds one
+symbol request per symbol in `.51`'s existing pinned research universe
+(27 symbols) instead of reading a hand-written `--requests-config` file.
+This module now exposes the same choice so the continuously-running
+scheduled loop can watch the full pinned universe, not just whatever
+symbols happen to be listed in a config file. Exactly one of
+`--requests-config` / `--scan-pinned-universe` is required, same
+fail-closed validation as `.56`. Nothing about the preview-only /
+no-order-submission guarantee above changes: this only changes which
+symbols get scanned each cycle, never what `.56.run_live_dry_run_cycle()`
+is allowed to do with them.
 """
 from __future__ import annotations
 
@@ -123,6 +138,7 @@ def run_one_cycle(
     max_snapshot_age_seconds: float,
     skip_account_equity_fetch: bool,
     now: datetime | None = None,
+    symbol_source: str = "requests_config",
 ) -> dict[str, Any]:
     result = stage3_module.run_live_dry_run_cycle(
         symbol_requests,
@@ -134,6 +150,7 @@ def run_one_cycle(
         max_snapshot_age_seconds=max_snapshot_age_seconds,
         skip_account_equity_fetch=skip_account_equity_fetch,
         now=now,
+        symbol_source=symbol_source,
     )
     result = dict(result)
     result["scheduled_runner_engine"] = ENGINE
@@ -171,6 +188,7 @@ def run_scheduled_loop(
     interval_seconds: float,
     market_hours_only: bool,
     max_iterations: int | None = None,
+    symbol_source: str = "requests_config",
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -211,6 +229,7 @@ def run_scheduled_loop(
             max_snapshot_age_seconds=max_snapshot_age_seconds,
             skip_account_equity_fetch=skip_account_equity_fetch,
             now=now,
+            symbol_source=symbol_source,
         )
         cycle_path = write_cycle_result(result, output_dir=output_dir, now=now)
         executed += 1
@@ -237,8 +256,15 @@ def run_scheduled_loop(
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiring
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--requests-config", required=True, type=Path,
-                         help="JSON file: list of {symbol, asset_class, quantity}. Same format as .56.")
+    parser.add_argument("--requests-config", required=False, default=None, type=Path,
+                         help="JSON file: list of {symbol, asset_class, quantity}. Same format as .56. "
+                              "Exactly one of --requests-config or --scan-pinned-universe is required.")
+    parser.add_argument("--scan-pinned-universe", action="store_true",
+                         help="Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): instead of a "
+                              "hand-written requests-config file, scan every symbol in .51's existing pinned "
+                              "universe (aura_v05351_equity_universe_v1.json, 27 symbols) every cycle -- "
+                              "quantity always auto-sized. Exactly one of --requests-config or "
+                              "--scan-pinned-universe is required.")
     parser.add_argument("--max-new-orders-per-cycle", required=True, type=int)
     parser.add_argument("--max-snapshot-age-seconds", required=True, type=float)
     parser.add_argument("--lookback-bars", type=int, default=None,
@@ -257,6 +283,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                               "Omit to run forever (Ctrl+C to stop).")
     args = parser.parse_args(argv)
 
+    if bool(args.requests_config) == bool(args.scan_pinned_universe):
+        print(
+            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED",
+            file=sys.stderr,
+        )
+        return 1
+
     stage3_module = load_stage3_module()
 
     try:
@@ -267,7 +300,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         bars_client = stage3_module.build_bars_client(api_key, secret_key, technical_module)
         alpaca_client = stage3_module.build_trading_client(api_key, secret_key)
 
-        symbol_requests = stage3_module.load_symbol_requests(args.requests_config)
+        if args.scan_pinned_universe:
+            symbol_requests = stage3_module.build_symbol_requests_from_pinned_universe(technical_module)
+            pinned_version = technical_module.load_pinned_universe().version
+            symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
+        else:
+            symbol_requests = stage3_module.load_symbol_requests(args.requests_config)
+            symbol_source = f"requests_config:{args.requests_config}"
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
         universe_version = args.universe_version or signal_source_module.UNIVERSE_VERSION
     except stage3_module.Stage3CliError as exc:
@@ -277,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     print(
         f"{VERSION} starting scheduled loop -- interval={args.interval_seconds}s, "
         f"market_hours_only={not args.run_outside_market_hours}, output_dir={args.output_dir}, "
-        f"symbols={[r.symbol for r in symbol_requests]}"
+        f"symbol_source={symbol_source}, symbols={[r.symbol for r in symbol_requests]}"
     )
     print("PREVIEW ONLY -- run_stage1b_paper_cycle is never called by this module; no order can be submitted.")
 
@@ -296,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             interval_seconds=args.interval_seconds,
             market_hours_only=not args.run_outside_market_hours,
             max_iterations=args.max_iterations,
+            symbol_source=symbol_source,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")

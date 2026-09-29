@@ -97,6 +97,10 @@ class FakeStage3Module:
     cycle_results: list[dict] = field(default_factory=list)
     cycle_calls: list[dict] = field(default_factory=list)
     alpaca_client: Any = None
+    pinned_universe_version: str = "v1"
+    pinned_universe_symbol_requests: tuple[FakeSymbolRequest, ...] = field(
+        default_factory=lambda: (FakeSymbolRequest("AAPL"), FakeSymbolRequest("SPY", asset_class="ETF"))
+    )
 
     def __post_init__(self):
         if self.alpaca_client is None:
@@ -108,7 +112,12 @@ class FakeStage3Module:
         return self.credentials
 
     def load_technical_module(self):
-        return SimpleNamespace()
+        return SimpleNamespace(
+            load_pinned_universe=lambda: SimpleNamespace(version=self.pinned_universe_version)
+        )
+
+    def build_symbol_requests_from_pinned_universe(self, technical_module):
+        return self.pinned_universe_symbol_requests
 
     def load_signal_source_module(self):
         return SimpleNamespace(
@@ -200,6 +209,41 @@ def test_run_one_cycle_calls_stage3_module_and_tags_result():
     assert call["now"] == NOW
     assert result["scheduled_runner_engine"] == M.ENGINE
     assert result["scheduled_runner_version"] == M.VERSION
+
+
+def test_run_one_cycle_defaults_symbol_source_to_requests_config():
+    stage3 = FakeStage3Module()
+    M.run_one_cycle(
+        stage3_module=stage3,
+        symbol_requests=stage3.symbol_requests,
+        bars_client="FAKE_BARS_CLIENT",
+        alpaca_client=stage3.alpaca_client,
+        max_new_orders_per_cycle=1,
+        lookback_bars=55,
+        universe_version="TEST_UNIVERSE_VERSION",
+        max_snapshot_age_seconds=300.0,
+        skip_account_equity_fetch=False,
+        now=NOW,
+    )
+    assert stage3.cycle_calls[0]["symbol_source"] == "requests_config"
+
+
+def test_run_one_cycle_passes_scan_pinned_universe_symbol_source_through():
+    stage3 = FakeStage3Module()
+    M.run_one_cycle(
+        stage3_module=stage3,
+        symbol_requests=stage3.pinned_universe_symbol_requests,
+        bars_client="FAKE_BARS_CLIENT",
+        alpaca_client=stage3.alpaca_client,
+        max_new_orders_per_cycle=1,
+        lookback_bars=55,
+        universe_version="TEST_UNIVERSE_VERSION",
+        max_snapshot_age_seconds=300.0,
+        skip_account_equity_fetch=False,
+        now=NOW,
+        symbol_source="scan_pinned_universe:v1:2_symbols",
+    )
+    assert stage3.cycle_calls[0]["symbol_source"] == "scan_pinned_universe:v1:2_symbols"
 
 
 # ============================================================================
@@ -393,9 +437,85 @@ def test_run_scheduled_loop_symbol_fetch_failure_in_cycle_is_recorded_not_raised
     assert written["symbol_fetch_failures"] == [{"symbol": "AAPL", "error": "LiveSignalSourceError: no data"}]
 
 
+def test_run_scheduled_loop_passes_symbol_source_to_every_cycle(tmp_path):
+    stage3 = FakeStage3Module()
+    executed = M.run_scheduled_loop(
+        symbol_requests=stage3.pinned_universe_symbol_requests,
+        bars_client="FAKE_BARS_CLIENT",
+        alpaca_client=stage3.alpaca_client,
+        stage3_module=stage3,
+        max_new_orders_per_cycle=1,
+        lookback_bars=55,
+        universe_version="TEST_UNIVERSE_VERSION",
+        max_snapshot_age_seconds=300.0,
+        skip_account_equity_fetch=False,
+        output_dir=tmp_path,
+        interval_seconds=5.0,
+        market_hours_only=False,
+        max_iterations=2,
+        symbol_source="scan_pinned_universe:v1:2_symbols",
+        sleep_fn=lambda s: None,
+        now_fn=make_ticking_clock(NOW),
+        log_fn=lambda msg: None,
+    )
+    assert executed == 2
+    assert all(call["symbol_source"] == "scan_pinned_universe:v1:2_symbols" for call in stage3.cycle_calls)
+
+
 # ============================================================================
 # 5. main() CLI boundary
 # ============================================================================
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_neither_given(capsys):
+    rc = M.main([
+        "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300",
+    ])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_both_given(tmp_path, capsys):
+    config_path = tmp_path / "requests.json"
+    config_path.write_text('[{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}]')
+
+    rc = M.main([
+        "--requests-config", str(config_path),
+        "--scan-pinned-universe",
+        "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300",
+    ])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+
+
+def test_main_scan_pinned_universe_builds_symbol_requests_and_passes_symbol_source(monkeypatch, capsys):
+    stage3 = FakeStage3Module()
+    monkeypatch.setattr(M, "load_stage3_module", lambda: stage3)
+
+    captured_kwargs: dict = {}
+
+    def fake_run_scheduled_loop(**kwargs):
+        captured_kwargs.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(M, "run_scheduled_loop", fake_run_scheduled_loop)
+
+    rc = M.main([
+        "--scan-pinned-universe",
+        "--max-new-orders-per-cycle", "3",
+        "--max-snapshot-age-seconds", "300",
+    ])
+    assert rc == 0
+    assert captured_kwargs["symbol_requests"] == stage3.pinned_universe_symbol_requests
+    assert captured_kwargs["symbol_source"] == "scan_pinned_universe:v1:2_symbols"
+
+    captured_out = capsys.readouterr().out
+    assert "symbol_source=scan_pinned_universe:v1:2_symbols" in captured_out
+    assert "AAPL" in captured_out and "SPY" in captured_out
 
 
 def test_main_fails_closed_on_missing_credentials(tmp_path, monkeypatch, capsys):
@@ -477,6 +597,7 @@ def test_load_stage3_module_returns_real_56_with_expected_surface():
         "build_bars_client",
         "build_trading_client",
         "load_symbol_requests",
+        "build_symbol_requests_from_pinned_universe",
         "run_live_dry_run_cycle",
     ):
         assert hasattr(stage3, attr), f"real .56 module is missing expected attribute: {attr}"
