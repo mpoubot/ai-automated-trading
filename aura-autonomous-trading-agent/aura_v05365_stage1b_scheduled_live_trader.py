@@ -94,6 +94,25 @@ Five safety mechanisms (Martin, AskUserQuestion, 2026-09-29)
    else in the repo needs "orders submitted today" -- unlike `.364`'s
    equity history, which multiple callers could plausibly want.
 
+Sixth mechanism -- EARNINGS BLACKOUT (Extension, 2026-09-29, Martin: "Lets
+go for Earnings blackout")
+------------------------------------------------------------------------
+Optional, via `--earnings-state-dir` (mirrors `--news-state-dir` exactly:
+omit it and this mechanism is entirely inert, reproducing this module's
+pre-existing behavior). When supplied, `.67` fetches/caches a Financial
+Modeling Prep earnings calendar (free tier; Martin's confirmed provider,
+2026-09-29 AskUserQuestion) and `.68`'s day-of blackout check is threaded
+through `.363`'s newly-exposed `earnings_state_dir`/
+`earnings_calendar_api_key` parameters into `.55`'s existing enforcement
+choke point -- blocking a NEW entry (never an exit) for any symbol
+reporting earnings that trading day. Fail-closed, Martin's explicit
+choice (AskUserQuestion, 2026-09-29): if the calendar can't be fetched and
+no fresh cache exists, `.68` blocks NEW entries for EVERY symbol that
+cycle, not just the ones actually reporting -- see `.68`'s own module
+docstring for why this is the safe default rather than silently trading
+through an FMP outage. Requires `FMP_API_KEY` in the environment (see
+`.env.example`).
+
 Market-hours gate
 ------------------------------------------------------------------------
 Reuses `.357.is_market_open()` verbatim (a read-only `get_clock()` call)
@@ -323,6 +342,8 @@ def run_one_live_cycle(
     equity_history_log_path: Path | None = None,
     now: datetime | None = None,
     symbol_source: str = "requests_config",
+    earnings_calendar_api_key: str | None = None,
+    earnings_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     result = manual_trigger_module.run_manual_trigger_stage1b_cycle(
         symbol_requests,
@@ -344,6 +365,8 @@ def run_one_live_cycle(
         now=now,
         symbol_source=symbol_source,
         limits=limits,
+        earnings_calendar_api_key=earnings_calendar_api_key,
+        earnings_state_dir=earnings_state_dir,
     )
     result = dict(result)
     result["live_trader_engine"] = ENGINE
@@ -384,6 +407,8 @@ def run_scheduled_live_loop(
     equity_history_log_path: Path | None = None,
     max_iterations: int | None = None,
     symbol_source: str = "requests_config",
+    earnings_calendar_api_key: str | None = None,
+    earnings_state_dir: Path | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -453,6 +478,8 @@ def run_scheduled_live_loop(
             equity_history_log_path=equity_history_log_path,
             now=now,
             symbol_source=symbol_source,
+            earnings_calendar_api_key=earnings_calendar_api_key,
+            earnings_state_dir=earnings_state_dir,
         )
         cycle_path = scheduled_runner_module.write_cycle_result(result, output_dir=output_dir, now=now)
         executed += 1
@@ -502,6 +529,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--news-state-dir", type=Path, default=None,
                          help="Directory for .46's persisted news ledger. Omit to skip news/live-evidence.")
     parser.add_argument("--news-fetch-limit", type=int, default=50)
+    parser.add_argument("--earnings-state-dir", type=Path, default=None,
+                         help="Directory for .67's persisted earnings-calendar cache. Omit to skip the earnings "
+                              "blackout gate entirely (no new-entry block on earnings day for any symbol). "
+                              "Requires FMP_API_KEY in the environment (see .env.example) -- a free key from "
+                              "https://site.financialmodelingprep.com/.")
     parser.add_argument("--strategy-id", type=str, default=DEFAULT_STRATEGY_ID)
     parser.add_argument("--strategy-version", type=str, default=DEFAULT_STRATEGY_VERSION)
     parser.add_argument("--equity-history-log-path", type=Path, default=None,
@@ -571,6 +603,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         alpaca_client = equity_cli.build_trading_client(api_key, secret_key)
         news_client = equity_cli.build_news_client(api_key, secret_key) if args.news_state_dir is not None else None
 
+        earnings_calendar_api_key = None
+        if args.earnings_state_dir is not None:
+            earnings_module = manual_trigger_module.load_earnings_calendar_module()
+            earnings_calendar_api_key = earnings_module.load_fmp_api_key()
+
         if args.scan_pinned_universe:
             symbol_requests = equity_cli.build_symbol_requests_from_pinned_universe(technical_module)
             pinned_version = technical_module.load_pinned_universe().version
@@ -583,6 +620,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     except manual_trigger_module.Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 -- covers .67's own
+        # EarningsCalendarIngestionError (e.g. a missing FMP_API_KEY) --
+        # fail-closed at startup, before any client is touched, never a
+        # raw traceback. See .363's identical handling for why this is a
+        # name check rather than an import (dynamically loaded module).
+        if type(exc).__name__ == "EarningsCalendarIngestionError":
+            print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
+            return 1
+        raise
 
     limits = enforcement_module.PortfolioLimits(
         max_daily_loss_pct_by_venue={"ALPACA": args.max_daily_loss_pct},
@@ -599,6 +645,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     )
     print(f"KILL SWITCH: create this exact file to stop the loop before its next cycle: {args.kill_switch_file}")
     print(f"limits: {limits.to_dict()}")
+    print(
+        f"earnings blackout gate: "
+        f"{'ENABLED (state_dir=' + str(args.earnings_state_dir) + ')' if args.earnings_state_dir is not None else 'DISABLED (--earnings-state-dir not set)'}"
+    )
     print("THIS MODULE CAN SUBMIT REAL ORDERS TO YOUR ALPACA PAPER ACCOUNT, REPEATEDLY, UNTIL STOPPED.")
 
     try:
@@ -629,6 +679,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             equity_history_log_path=args.equity_history_log_path,
             max_iterations=args.max_iterations,
             symbol_source=symbol_source,
+            earnings_calendar_api_key=earnings_calendar_api_key,
+            earnings_state_dir=args.earnings_state_dir,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")

@@ -618,3 +618,122 @@ def test_limits_supplied_is_threaded_into_stage1b_paper_cycle_call(monkeypatch):
     assert captured["kwargs"]["limits"] is limits
     assert "caller-supplied" in result["portfolio_limits_source"]
     assert result["limits_applied"] == limits.to_dict()
+
+
+# ============================================================================
+# Earnings-blackout wiring -- Extension, 2026-09-29 (Martin, "Lets go for
+# Earnings blackout"). Mirrors the `limits` wiring tests above: a spy on
+# `.55.run_stage1b_paper_cycle` proves the value actually threads through,
+# without needing full evidence-building fixtures.
+# ============================================================================
+
+
+class _FakeEarningsCalendarState:
+    def __init__(self, *, status="OK", calendar_by_symbol=None, error=None):
+        self.status = status
+        self.calendar_by_symbol = calendar_by_symbol or {}
+        self.error = error
+
+    def to_dict(self):
+        return {"status": self.status, "calendar_by_symbol": {}, "error": self.error}
+
+
+def test_earnings_state_dir_omitted_reproduces_original_behavior():
+    bars_client = FakeBarsClient(bars_by_symbol={})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW,
+        # earnings_calendar_api_key / earnings_state_dir both omitted
+    )
+    assert result["earnings_calendar_status"] is None
+
+
+def test_earnings_calendar_state_fetched_and_threaded_into_stage1b_paper_cycle_call(monkeypatch, tmp_path):
+    fake_state = _FakeEarningsCalendarState(status="OK", calendar_by_symbol={"AAPL": ()})
+    refresh_calls = {}
+
+    class _FakeEarningsModule:
+        @staticmethod
+        def refresh_earnings_calendar_if_stale(*, api_key, state_dir, universe_symbols, now):
+            refresh_calls["kwargs"] = dict(api_key=api_key, state_dir=state_dir, universe_symbols=universe_symbols, now=now)
+            return fake_state
+
+    monkeypatch.setattr(M, "load_earnings_calendar_module", lambda: _FakeEarningsModule())
+
+    captured = {}
+    real_stage1b = STAGE1.run_stage1b_paper_cycle
+
+    def _spy(symbol_requests, **kwargs):
+        captured["kwargs"] = kwargs
+        return real_stage1b(symbol_requests, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1b_paper_cycle", _spy)
+
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0, assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=5),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW, earnings_calendar_api_key="fake-fmp-key", earnings_state_dir=tmp_path,
+    )
+    assert refresh_calls["kwargs"]["api_key"] == "fake-fmp-key"
+    assert refresh_calls["kwargs"]["state_dir"] == tmp_path
+    assert refresh_calls["kwargs"]["universe_symbols"] == ("AAPL",)
+    assert captured["kwargs"]["earnings_calendar_state"] is fake_state
+    assert result["earnings_calendar_status"] == fake_state.to_dict()
+
+
+def test_earnings_calendar_not_refreshed_when_no_usable_symbols(monkeypatch, tmp_path):
+    # Mirrors the news block's own "and usable_requests" gate -- no point
+    # burning an API call for a cycle where every symbol already failed
+    # its evidence fetch.
+    refresh_calls = []
+
+    class _FakeEarningsModule:
+        @staticmethod
+        def refresh_earnings_calendar_if_stale(**kwargs):
+            refresh_calls.append(kwargs)
+            return _FakeEarningsCalendarState()
+
+    monkeypatch.setattr(M, "load_earnings_calendar_module", lambda: _FakeEarningsModule())
+
+    bars_client = FakeBarsClient(bars_by_symbol={})  # AAPL fetch fails -> no usable_requests
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW, earnings_calendar_api_key="fake-fmp-key", earnings_state_dir=tmp_path,
+    )
+    assert refresh_calls == []
+    assert result["earnings_calendar_status"] is None
+
+
+def test_cli_earnings_state_dir_without_fmp_api_key_fails_closed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(EQUITY_CLI.EQUITY_API_KEY_ENV, "FAKE_KEY")
+    monkeypatch.setenv(EQUITY_CLI.EQUITY_SECRET_KEY_ENV, "FAKE_SECRET")
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
+    reqs_path = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}])
+    output_path = tmp_path / "out.json"
+    argv = [
+        "--requests-config", str(reqs_path), "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300", "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1", "--output", str(output_path),
+        "--i-confirm-this-submits-real-paper-orders",
+        "--earnings-state-dir", str(tmp_path / "earnings_state"),
+    ]
+    rc = M.main(argv)
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "FAIL-CLOSED" in captured.err
+    assert "MISSING_FMP_API_KEY" in captured.err
+    assert not output_path.exists()

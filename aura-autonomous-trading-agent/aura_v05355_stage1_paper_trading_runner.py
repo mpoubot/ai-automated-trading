@@ -163,6 +163,10 @@ def load_fill_reconciliation_module():
     return _load_module("aura_v05354_alpaca_equity_fill_reconciliation", "aura_v05354_alpaca_equity_fill_reconciliation.py")
 
 
+def load_earnings_blackout_module():
+    return _load_module("aura_v05368_earnings_blackout_gate", "aura_v05368_earnings_blackout_gate.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -462,6 +466,33 @@ def _find_position(snapshot: Any, symbol: str) -> dict[str, Any] | None:
 
 
 # ============================================================================
+# Earnings-blackout composition -- Extension, 2026-09-29 (Martin, "Lets go
+# for Earnings blackout"). `.68`'s check is ANDed with whatever portfolio-
+# enforcement check_fn this cycle already built (which may itself be
+# `None` in Stage 1A when `limits` was not supplied) via `.68`'s own
+# generic `combine_enforcement_check_fns`. `earnings_calendar_state` is a
+# `.67.EarningsCalendarState` -- optional, `None` reproduces this module's
+# original behavior exactly (no earnings check at all), matching every
+# other optional-feature parameter in this chain (e.g. `.63`'s
+# `news_state_dir`).
+# ============================================================================
+
+
+def _compose_with_earnings_blackout(
+    enforcement_check_fn: Callable[[str, str, Any, Any], Any] | None,
+    *,
+    earnings_calendar_state: Any | None,
+    now_dt: datetime,
+) -> Callable[[str, str, Any, Any], Any] | None:
+    if earnings_calendar_state is None:
+        return enforcement_check_fn
+    earnings_module = load_earnings_blackout_module()
+    as_of_date = earnings_module.market_date_from_utc(now_dt)
+    earnings_check_fn = earnings_module.build_earnings_blackout_check_fn(earnings_calendar_state, as_of_date=as_of_date)
+    return earnings_module.combine_enforcement_check_fns(enforcement_check_fn, earnings_check_fn)
+
+
+# ============================================================================
 # Stage 1A -- dry run. attempt_submission is hardcoded False; no broker
 # call of any kind is ever made by this function.
 # ============================================================================
@@ -481,6 +512,7 @@ def run_stage1a_dry_run(
     max_snapshot_age_seconds: float | None = None,
     now: datetime | None = None,
     synthetic_account_equity_usd: float | None = None,
+    earnings_calendar_state: Any | None = None,
 ) -> Stage1CycleReport:
     """Exercises the full lifecycle from evidence through `.38` construction
     preview (`READY_FOR_SUBMISSION`/`CONSTRUCTION_ONLY`), never a real
@@ -528,7 +560,16 @@ def run_stage1a_dry_run(
     real numeric-limit ALLOW/BLOCK contrast.
 
     Leaving `limits=None` (the default) skips enforcement entirely, exactly
-    matching this function's original behavior."""
+    matching this function's original behavior.
+
+    `earnings_calendar_state` (Extension, 2026-09-29): an optional
+    `.67.EarningsCalendarState`. When supplied, `.68`'s earnings-blackout
+    check is ANDed with whatever portfolio-enforcement check this call
+    already built (see `_compose_with_earnings_blackout`) -- so Stage 1A
+    can genuinely preview an earnings-day BLOCK with zero broker contact,
+    exactly as it already can for a `.44` LIMIT_BREACHED BLOCK. Leaving it
+    `None` (the default) reproduces this function's original behavior
+    exactly: no earnings check at all."""
     now_dt = now or datetime.now(timezone.utc)
     cycle_module = load_cycle_module()
     metadata_module = load_metadata_module()
@@ -583,6 +624,10 @@ def run_stage1a_dry_run(
             now=enforcement_now, decisions_by_symbol=decisions_by_symbol,
             enforcement_module=enforcement_module, observability_module=observability_module,
         )
+
+    enforcement_check_fn = _compose_with_earnings_blackout(
+        enforcement_check_fn, earnings_calendar_state=earnings_calendar_state, now_dt=now_dt,
+    )
 
     # Two independent kill switches gate this path: `.38`'s own supervisor
     # kill switch (`supervisor_config`) AND `.36`'s own, separate
@@ -659,6 +704,7 @@ def run_stage1b_paper_cycle(
     strategy_id: str = DEFAULT_STRATEGY_ID,
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
     now: datetime | None = None,
+    earnings_calendar_state: Any | None = None,
 ) -> Stage1CycleReport:
     """`supervision_kwargs` MUST include an explicit `auth_config` (with
     `execution_authorized`/`paper_execution_authorized` set True -- `.36`'s
@@ -668,7 +714,17 @@ def run_stage1b_paper_cycle(
     caller. `alpaca_client` must already expose `.get_account()`,
     `.get_all_positions()`, `.get_asset(symbol)`, `.get_order_by_client_id()`
     and `.submit_order()` -- a real alpaca-py `TradingClient(paper=True)`
-    in production, matching every other Alpaca call site in this repo."""
+    in production, matching every other Alpaca call site in this repo.
+
+    `earnings_calendar_state` (Extension, 2026-09-29): an optional
+    `.67.EarningsCalendarState`. When supplied, `.68`'s earnings-blackout
+    check is ANDed with the real `.44` portfolio-enforcement check this
+    function always builds (see `_compose_with_earnings_blackout`) --
+    unlike `limits`, there is no "skip enforcement entirely" branch here,
+    so a symbol in blackout today is blocked the same way a
+    LIMIT_BREACHED symbol is: recorded at stage `NO_TRADE_DECIDED`, never
+    reaching `.38`. Leaving it `None` (the default) reproduces this
+    function's original behavior exactly: no earnings check at all."""
     now_dt = now or datetime.now(timezone.utc)
     cycle_module = load_cycle_module()
     metadata_module = load_metadata_module()
@@ -713,6 +769,9 @@ def run_stage1b_paper_cycle(
         max_snapshot_age_seconds=max_snapshot_age_seconds, reference_price_fn=reference_price_fn,
         now=enforcement_now, decisions_by_symbol=decisions_by_symbol,
         enforcement_module=enforcement_module, observability_module=observability_module,
+    )
+    enforcement_check_fn = _compose_with_earnings_blackout(
+        enforcement_check_fn, earnings_calendar_state=earnings_calendar_state, now_dt=now_dt,
     )
 
     metadata_records = [

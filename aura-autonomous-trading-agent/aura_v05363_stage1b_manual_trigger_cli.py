@@ -204,6 +204,13 @@ def load_equity_history_log_module():
     return _load_module("aura_v05364_equity_history_log", "aura_v05364_equity_history_log.py")
 
 
+def load_earnings_calendar_module():
+    """`.367` -- Extension, 2026-09-29 (Martin, "Lets go for Earnings
+    blackout"). Optional: only loaded/used when the caller supplies both
+    `earnings_calendar_api_key` and `earnings_state_dir`."""
+    return _load_module("aura_v05367_earnings_calendar_ingestion", "aura_v05367_earnings_calendar_ingestion.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -267,6 +274,8 @@ def run_manual_trigger_stage1b_cycle(
     now: datetime | None = None,
     symbol_source: str = "requests_config",
     limits: Any | None = None,
+    earnings_calendar_api_key: str | None = None,
+    earnings_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -289,7 +298,19 @@ def run_manual_trigger_stage1b_cycle(
     loop) can supply a `.344.PortfolioLimits` instance without this module
     reimplementing anything -- `.55` already accepts and correctly applies
     `limits`, this module just was not exposing that existing capability
-    until now."""
+    until now.
+
+    Extension -- 2026-09-29 (Martin, "Lets go for Earnings blackout"):
+    `earnings_calendar_api_key`/`earnings_state_dir` are new, OPTIONAL
+    keyword-only parameters, mirroring `news_client`/`news_state_dir`
+    exactly. When both are supplied, `.67`'s earnings calendar is
+    refreshed-if-stale (scoped to this cycle's usable symbols) and the
+    resulting `.67.EarningsCalendarState` is threaded through to `.55`'s
+    `run_stage1b_paper_cycle(earnings_calendar_state=...)`, which ANDs
+    `.68`'s day-of blackout check with the real `.44` enforcement check
+    this function already builds. Leaving either unset (the default)
+    reproduces this function's original behavior exactly: no earnings
+    check at all."""
     if not confirmed:
         raise Stage1BManualTriggerCliError(
             "SUBMISSION_NOT_CONFIRMED:this cycle will not run without explicit confirmation "
@@ -343,6 +364,20 @@ def run_manual_trigger_stage1b_cycle(
         }
         live_evidence_by_symbol = orchestrator_module.build_live_evidence_for_universe(
             bars_as_dicts_by_symbol, news_events, now=now_dt,
+        )
+
+    # -- Earnings calendar (Extension, 2026-09-29) -- same "only when both
+    #    a client/key and a state dir are supplied" gating as the news
+    #    block above. Scoped to this cycle's usable symbols; `.67` itself
+    #    re-derives the filtered calendar from a universe-agnostic cache,
+    #    so this is correct even across universe changes (see `.67`'s
+    #    module docstring). --
+    earnings_calendar_state = None
+    if earnings_calendar_api_key is not None and earnings_state_dir is not None and usable_requests:
+        earnings_module = load_earnings_calendar_module()
+        earnings_calendar_state = earnings_module.refresh_earnings_calendar_if_stale(
+            api_key=earnings_calendar_api_key, state_dir=earnings_state_dir,
+            universe_symbols=tuple(r.symbol for r in usable_requests), now=now_dt,
         )
 
     decide_kwargs = dict(
@@ -418,6 +453,7 @@ def run_manual_trigger_stage1b_cycle(
                             # exactly as before 2026-09-29. A caller (e.g. .365) may now supply real limits here.
             strategy_id=strategy_id, strategy_version=strategy_version,
             now=now_dt,
+            earnings_calendar_state=earnings_calendar_state,
         )
 
     return {
@@ -430,6 +466,7 @@ def run_manual_trigger_stage1b_cycle(
         "lookback_bars": lookback_bars,
         "decide_kwargs_source": "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS",
         "news_ingestion_status": news_ingestion_status,
+        "earnings_calendar_status": earnings_calendar_state.to_dict() if earnings_calendar_state is not None else None,
         "sector_rotation_by_symbol": {
             symbol: (ev.sector_rotation_regime.to_dict() if ev.sector_rotation_regime is not None else None)
             for symbol, ev in live_evidence_by_symbol.items()
@@ -500,6 +537,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                          help="Directory for .46's persisted news ledger. Omit to skip news/live-evidence "
                               "(sentiment_regime=None/wave_result=None for every symbol).")
     parser.add_argument("--news-fetch-limit", type=int, default=50)
+    parser.add_argument("--earnings-state-dir", type=Path, default=None,
+                         help="Directory for .67's persisted earnings-calendar cache. Omit to skip the earnings "
+                              "blackout gate entirely (no new-entry block on earnings day for any symbol). "
+                              "Requires FMP_API_KEY in the environment (see .env.example) -- a free key from "
+                              "https://site.financialmodelingprep.com/.")
     parser.add_argument("--strategy-id", type=str, default=DEFAULT_STRATEGY_ID)
     parser.add_argument("--strategy-version", type=str, default=DEFAULT_STRATEGY_VERSION)
     parser.add_argument("--equity-history-log-path", type=Path, default=None,
@@ -531,6 +573,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         alpaca_client = equity_cli.build_trading_client(api_key, secret_key)
         news_client = equity_cli.build_news_client(api_key, secret_key) if args.news_state_dir is not None else None
 
+        earnings_calendar_api_key = None
+        if args.earnings_state_dir is not None:
+            earnings_module = load_earnings_calendar_module()
+            earnings_calendar_api_key = earnings_module.load_fmp_api_key()
+
         if args.scan_pinned_universe:
             symbol_requests = equity_cli.build_symbol_requests_from_pinned_universe(technical_module)
             pinned_version = technical_module.load_pinned_universe().version
@@ -551,10 +598,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             strategy_id=args.strategy_id, strategy_version=args.strategy_version,
             equity_history_log_path=args.equity_history_log_path,
             symbol_source=symbol_source,
+            earnings_calendar_api_key=earnings_calendar_api_key, earnings_state_dir=args.earnings_state_dir,
         )
     except Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 -- covers .67's own
+        # EarningsCalendarIngestionError (e.g. a missing FMP_API_KEY),
+        # raised before this module's own try block would otherwise catch
+        # it via Stage1BManualTriggerCliError -- fail-closed at the CLI
+        # boundary, never a raw traceback, matching this module's own
+        # discipline for every other startup-time misconfiguration.
+        if type(exc).__name__ == "EarningsCalendarIngestionError":
+            print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
+            return 1
+        raise
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8")

@@ -589,3 +589,132 @@ def test_enforcement_check_fn_rejects_bad_quantity():
     )
     with pytest.raises(M.Stage1RunnerError):
         check("AAPL", "OPEN_LONG", "not-a-number", None)
+
+
+# ============================================================================
+# Earnings-blackout composition -- Extension, 2026-09-29. NOW (2026-09-23
+# 12:00 UTC) is 08:00 America/New_York the same calendar date, so a
+# blackout keyed on date(2026, 9, 23) is "today" for these fixtures with
+# no timezone-boundary ambiguity.
+# ============================================================================
+
+from datetime import date as _date  # noqa: E402 -- local, test-only import kept near its first use
+from datetime import timedelta as _timedelta  # noqa: E402
+
+
+def _fresh_equity_history_fixture():
+    """Unlike the shared `equity_history_fixture()` above (hardcoded to a
+    fixed 2026-09-23 date, which `.44`'s daily_loss dimension increasingly
+    rejects as INSUFFICIENT_HISTORY the further real wall-clock time drifts
+    past it -- `run_stage1b_paper_cycle` always captures its OWN real,
+    fresh `datetime.now(timezone.utc)` for the enforcement freshness/
+    daily-loss-day-key check, regardless of any caller-supplied `now`; see
+    that function's own docstring), this fixture is anchored to the REAL
+    current time so these earnings-blackout wiring tests stay valid
+    whenever they are actually run, not just on the day they were written."""
+    real_now = datetime.now(timezone.utc)
+    return [{"venue": "ALPACA", "equity": 100000.0, "as_of": (real_now - _timedelta(hours=1)).isoformat()}]
+
+
+class FakeEarningsCalendarState:
+    """Minimal duck-typed stand-in for `.67.EarningsCalendarState` -- `.68`
+    (and, transitively, `.55`) only ever reads `.status`/`.calendar_by_symbol`/
+    `.error`, exactly like every other cross-module boundary in this repo."""
+
+    def __init__(self, *, status="OK", calendar_by_symbol=None, error=None):
+        self.status = status
+        self.calendar_by_symbol = calendar_by_symbol or {}
+        self.error = error
+
+
+def test_stage1b_earnings_calendar_ok_no_blackout_still_submits(tmp_path):
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 10, 1),)})  # not today
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-ok"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        earnings_calendar_state=calendar_state,
+    )
+    record = report.audit_records[0]
+    assert record.submission_status == "SUBMITTED"
+    assert len(client.submit_calls) == 1
+
+
+def test_stage1b_earnings_blackout_blocks_new_entry_not_submitted(tmp_path):
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 9, 23),)})  # today
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-blackout"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        earnings_calendar_state=calendar_state,
+    )
+    record = report.audit_records[0]
+    assert record.cycle_stage == "NO_TRADE_DECIDED"
+    assert record.submission_status is None
+    assert client.submit_calls == []
+    assert any(r.startswith("EARNINGS_BLACKOUT:AAPL") for r in record.reasons)
+    # The portfolio-enforcement dimension still ran and still recorded its
+    # own independent ALLOW verdict -- the earnings block never suppresses
+    # or short-circuits `.44`'s own audit trail (see `.68`'s
+    # combine_enforcement_check_fns docstring, "ALWAYS called").
+    assert record.risk_decision_status == "ALLOW"
+
+
+def test_stage1b_earnings_calendar_unavailable_blocks_even_a_non_reporting_symbol(tmp_path):
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    calendar_state = FakeEarningsCalendarState(status="UNAVAILABLE", error="RequestException: timed out")
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-unavailable"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        earnings_calendar_state=calendar_state,
+    )
+    record = report.audit_records[0]
+    assert record.cycle_stage == "NO_TRADE_DECIDED"
+    assert client.submit_calls == []
+    assert any(r.startswith("EARNINGS_CALENDAR_UNAVAILABLE:") for r in record.reasons)
+
+
+def test_stage1b_earnings_calendar_state_none_reproduces_original_behavior(tmp_path):
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=_fresh_equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "earnings-none"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        # earnings_calendar_state omitted -- defaults to None
+    )
+    record = report.audit_records[0]
+    assert record.submission_status == "SUBMITTED"
+    assert len(client.submit_calls) == 1
+
+
+def test_stage1a_earnings_blackout_blocks_preview_no_broker_contact():
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 9, 23),)})  # today
+    report = M.run_stage1a_dry_run(
+        reqs, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5, now=NOW,
+        earnings_calendar_state=calendar_state,
+    )
+    record = report.audit_records[0]
+    assert record.cycle_stage == "NO_TRADE_DECIDED"
+    assert any(r.startswith("EARNINGS_BLACKOUT:AAPL") for r in record.reasons)
+
+
+def test_compose_with_earnings_blackout_none_state_is_a_noop():
+    assert M._compose_with_earnings_blackout(None, earnings_calendar_state=None, now_dt=NOW) is None
+    sentinel = object()
+
+    def fake_check(symbol, direction, quantity, decision):
+        return sentinel
+
+    assert M._compose_with_earnings_blackout(fake_check, earnings_calendar_state=None, now_dt=NOW) is fake_check
