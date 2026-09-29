@@ -874,3 +874,117 @@ def test_main_fails_closed_on_missing_requests_config(tmp_path, monkeypatch, cap
     ])
     assert rc == 1
     assert not out.exists()
+
+
+# ============================================================================
+# Extension -- 2026-09-29, wide scan against .51's pinned universe
+# (Martin, AskUserQuestion). See build_symbol_requests_from_pinned_universe's
+# own docstring for the design: the actual per-cycle-cap ranking (highest
+# |final_rank_score| first) is entirely .53's existing, already-tested
+# logic -- nothing new was built for that part, so it is not re-tested here.
+# ============================================================================
+
+
+def test_build_symbol_requests_from_pinned_universe_matches_pinned_json():
+    reqs = M.build_symbol_requests_from_pinned_universe(M51)
+    pinned = M51.load_pinned_universe()
+
+    assert len(reqs) == len(pinned.symbols) == 27
+    assert tuple(r.symbol for r in reqs) == pinned.symbols
+    assert all(r.quantity is None for r in reqs)
+
+    etfs = {r.symbol for r in reqs if r.asset_class == "ETF"}
+    stocks = {r.symbol for r in reqs if r.asset_class == "STOCK"}
+    assert etfs == {"SPY", "QQQ", "IWM", "GLD", "SLV"}
+    assert stocks == set(pinned.symbols) - etfs
+    assert len(stocks) == 22
+
+
+def test_build_symbol_requests_from_pinned_universe_all_valid_asset_classes():
+    # Every LiveSymbolRequest.__post_init__ already validates asset_class
+    # against REQUIRED_ASSET_CLASSES and raises on a bad value -- this just
+    # confirms construction never raises for the real pinned universe.
+    reqs = M.build_symbol_requests_from_pinned_universe(M51)
+    assert all(r.asset_class in M.REQUIRED_ASSET_CLASSES for r in reqs)
+
+
+def test_run_live_dry_run_cycle_symbol_source_defaults_to_requests_config():
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    result = M.run_live_dry_run_cycle(
+        (M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=1),),
+        bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=5,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
+    )
+    assert result["symbol_source"] == "requests_config"
+
+
+def test_run_live_dry_run_cycle_scan_pinned_universe_symbol_source_propagates():
+    pinned = M51.load_pinned_universe()
+    symbol_requests = M.build_symbol_requests_from_pinned_universe(M51)
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={s: bars for s in pinned.symbols})
+
+    result = M.run_live_dry_run_cycle(
+        symbol_requests, bars_client=bars_client, alpaca_client=None, max_new_orders_per_cycle=3,
+        lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=300.0, skip_account_equity_fetch=True, now=NOW,
+        symbol_source=f"scan_pinned_universe:{pinned.version}:{len(symbol_requests)}_symbols",
+    )
+    assert result["symbol_source"] == f"scan_pinned_universe:v1:27_symbols"
+    # skip_account_equity_fetch=True -> every symbol is unsizeable (no
+    # explicit quantity, no equity to auto-size from) -- confirms all 27
+    # were actually evaluated (evidence fetched, sizing attempted), not
+    # silently truncated somewhere, without needing to fake 27 accounts'
+    # worth of ATR sizing math just to prove the wiring works.
+    assert len(result["sizing_failures"]) == 27
+    assert result["stage1_report"] is None
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_neither_given(tmp_path, capsys):
+    out = tmp_path / "out.json"
+    rc = M.main([
+        "--max-new-orders-per-cycle", "5", "--max-snapshot-age-seconds", "300",
+        "--skip-account-equity-fetch", "--output", str(out),
+    ])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    # Fails before even attempting to load credentials.
+    assert EQUITY_API_KEY_ENV not in captured.err
+    assert not out.exists()
+
+
+def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_both_given(tmp_path):
+    p = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 10}])
+    out = tmp_path / "out.json"
+    rc = M.main([
+        "--requests-config", str(p), "--scan-pinned-universe",
+        "--max-new-orders-per-cycle", "5", "--max-snapshot-age-seconds", "300",
+        "--skip-account-equity-fetch", "--output", str(out),
+    ])
+    assert rc == 1
+    assert not out.exists()
+
+
+def test_main_scan_pinned_universe_end_to_end(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(EQUITY_API_KEY_ENV, "FAKE_KEY")
+    monkeypatch.setenv(EQUITY_SECRET_KEY_ENV, "FAKE_SECRET")
+    pinned = M51.load_pinned_universe()
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={s: bars for s in pinned.symbols})
+    monkeypatch.setattr(M, "build_bars_client", lambda *a, **k: bars_client)
+
+    out = tmp_path / "out.json"
+    rc = M.main([
+        "--scan-pinned-universe", "--max-new-orders-per-cycle", "5",
+        "--max-snapshot-age-seconds", "300", "--skip-account-equity-fetch",
+        "--output", str(out),
+    ])
+    assert rc == 0
+    written = json.loads(out.read_text())
+    assert written["symbol_source"] == f"scan_pinned_universe:{pinned.version}:27_symbols"
+    # All 27 symbols were actually fetched against the fake bars client --
+    # not just the ones a hand-written requests-config would have named.
+    assert len(bars_client.requests) == 27

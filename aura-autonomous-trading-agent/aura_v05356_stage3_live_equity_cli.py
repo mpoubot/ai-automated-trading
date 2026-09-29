@@ -146,6 +146,32 @@ constant is deliberately kept separate from `.054`'s frozen one. Running
 this CLI today, with real credentials and real market/news data, will
 produce real (non-forced-ABSTAIN) `TradingDecision`s for the first time --
 still only ever previewed via `.38`, never submitted.
+
+Extension -- 2026-09-29, wide scan against the pinned universe
+------------------------------------------------------------------------
+Per Martin's request ("add a wide scan") and subsequent scoping
+(`AskUserQuestion`, 2026-09-29): the new `--scan-pinned-universe` flag is
+an alternative to `--requests-config` (exactly one of the two is
+required) that builds symbol requests from every symbol in `.51`'s
+existing pinned research universe (`aura_v05351_equity_universe_v1.json`,
+27 symbols) instead of a hand-written file, via the new
+`build_symbol_requests_from_pinned_universe()`. quantity is always
+auto-sized (never an explicit override) for a scan.
+
+This does NOT add any new ranking/selection logic: which of the scanned
+symbols actually reach `.38`'s preview when more than
+`max_new_orders_per_cycle` produce a `DECIDE_LONG`/`DECIDE_SHORT` outcome
+is decided entirely by `.53`'s own, already-built, already-tested
+ranking (`abs(decision.final_rank_score)` descending, ties broken by
+symbol ascending -- see `.53`'s own module docstring, "Ranking and the
+per-cycle cap"). Scanning a wider symbol list just means `.53`'s existing
+selection now has more candidates to rank; nothing new was built for
+that part, per Martin's explicit choice of this option over an
+alternative that would have ranked by universe-list order instead.
+
+This lands in `.56` (dry-run, zero broker contact) first and only --
+wiring the identical scan capability into `.363` (real paper submission)
+is a deliberately separate, later step, not part of this extension.
 """
 from __future__ import annotations
 
@@ -167,6 +193,15 @@ EQUITY_API_KEY_ENV = "ALPACA_EQUITY_PAPER_API_KEY"
 EQUITY_SECRET_KEY_ENV = "ALPACA_EQUITY_PAPER_SECRET_KEY"
 
 REQUIRED_ASSET_CLASSES = frozenset({"STOCK", "ETF"})
+
+# Extension -- 2026-09-29, wide scan against the pinned universe (Martin,
+# AskUserQuestion): .51's pinned universe JSON (aura_v05351_equity_universe_v1.json)
+# is a flat symbol list with no per-symbol asset_class field, so this classifies
+# the 5 ETF tickers it contains (SPY/QQQ/IWM/GLD/SLV) -- everything else in that
+# file is a stock. This is read directly off the pinned universe's own current
+# contents, not invented; if the universe file's symbol list changes, this set
+# needs a matching update (see build_symbol_requests_from_pinned_universe).
+KNOWN_ETF_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "GLD", "SLV"})
 
 
 class Stage3CliError(Exception):
@@ -353,6 +388,44 @@ def load_symbol_requests(path: Path) -> tuple[LiveSymbolRequest, ...]:
     return tuple(requests)
 
 
+def build_symbol_requests_from_pinned_universe(
+    technical_module: Any,
+) -> tuple[LiveSymbolRequest, ...]:
+    """Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): builds
+    one LiveSymbolRequest per symbol in .51's existing pinned research
+    universe (aura_v05351_equity_universe_v1.json) -- the same 27-symbol
+    list already used elsewhere in this repo for signal generation, not an
+    invented new universe. .51's own docstring is explicit that this is a
+    "research starting universe, not a live-trading validation claim" --
+    that caveat still applies here; scanning it does not mean every symbol
+    in it is validated for live trading, only that it's the one already-
+    vetted default list found anywhere in this repo (see .51's reuse-first
+    audit note).
+
+    quantity is always None (auto-sized via ATR risk sizing that cycle,
+    same as an omitted quantity in a hand-written requests-config file).
+    asset_class is classified via KNOWN_ETF_SYMBOLS since the pinned
+    universe JSON carries no per-symbol type of its own.
+
+    Which of the scanned symbols actually receive an order when more than
+    max_new_orders_per_cycle qualify is decided entirely by .53's own,
+    already-built, already-tested ranking (rank by |final_rank_score|
+    descending, ties broken by symbol ascending -- see .53's module
+    docstring, "Ranking and the per-cycle cap"). Nothing new was built for
+    that part; scanning a wider symbol list just means .53's existing
+    selection logic now has more candidates to rank.
+    """
+    universe = technical_module.load_pinned_universe()
+    return tuple(
+        LiveSymbolRequest(
+            symbol=symbol,
+            asset_class="ETF" if symbol in KNOWN_ETF_SYMBOLS else "STOCK",
+            quantity=None,
+        )
+        for symbol in universe.symbols
+    )
+
+
 # ============================================================================
 # Real evidence fetch -- one real bars call per symbol, reused for both
 # `.51` and `.52` (never fetched twice), plus the last real close kept
@@ -524,6 +597,7 @@ def run_live_dry_run_cycle(
     news_state_dir: Path | None = None,
     news_fetch_limit: int = 50,
     now: datetime | None = None,
+    symbol_source: str = "requests_config",
 ) -> dict[str, Any]:
     now_dt = now or datetime.now(timezone.utc)
 
@@ -634,6 +708,7 @@ def run_live_dry_run_cycle(
         "engine": ENGINE,
         "version": VERSION,
         "observed_at": _now_iso(now_dt),
+        "symbol_source": symbol_source,
         "universe_version": universe_version,
         "lookback_bars": lookback_bars,
         "technical_scoring_params_source": "aura_v054_signal_source.FROZEN_TECHNICAL_PARAMS",
@@ -703,8 +778,15 @@ def _stage1_report_to_dict(report: Any, stage1_module: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiring, exercised via unit tests on its pieces, not this shell
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--requests-config", required=True, type=Path,
-                         help="JSON file: list of {symbol, asset_class, quantity}. No default universe.")
+    parser.add_argument("--requests-config", required=False, default=None, type=Path,
+                         help="JSON file: list of {symbol, asset_class, quantity}. No default universe. "
+                              "Exactly one of --requests-config or --scan-pinned-universe is required.")
+    parser.add_argument("--scan-pinned-universe", action="store_true",
+                         help="Extension -- 2026-09-29, wide scan (Martin, AskUserQuestion): instead of a "
+                              "hand-written requests-config file, build symbol requests from every symbol in "
+                              ".51's existing pinned universe (aura_v05351_equity_universe_v1.json, 27 "
+                              "symbols) -- quantity always auto-sized. Exactly one of --requests-config or "
+                              "--scan-pinned-universe is required.")
     parser.add_argument("--max-new-orders-per-cycle", required=True, type=int)
     parser.add_argument("--max-snapshot-age-seconds", required=True, type=float,
                          help="Required, no default -- .44's own freshness-check discipline.")
@@ -726,6 +808,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
 
+    if bool(args.requests_config) == bool(args.scan_pinned_universe):
+        print(
+            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         api_key, secret_key = load_equity_paper_credentials()
         technical_module = load_technical_module()
@@ -735,7 +824,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         alpaca_client = None if args.skip_account_equity_fetch else build_trading_client(api_key, secret_key)
         news_client = build_news_client(api_key, secret_key) if args.news_state_dir is not None else None
 
-        symbol_requests = load_symbol_requests(args.requests_config)
+        if args.scan_pinned_universe:
+            symbol_requests = build_symbol_requests_from_pinned_universe(technical_module)
+            pinned_version = technical_module.load_pinned_universe().version
+            symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
+        else:
+            symbol_requests = load_symbol_requests(args.requests_config)
+            symbol_source = f"requests_config:{args.requests_config}"
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
         universe_version = args.universe_version or signal_source_module.UNIVERSE_VERSION
 
@@ -745,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             universe_version=universe_version, max_snapshot_age_seconds=args.max_snapshot_age_seconds,
             skip_account_equity_fetch=args.skip_account_equity_fetch,
             news_client=news_client, news_state_dir=args.news_state_dir, news_fetch_limit=args.news_fetch_limit,
+            symbol_source=symbol_source,
         )
     except Stage3CliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
