@@ -266,6 +266,7 @@ def run_manual_trigger_stage1b_cycle(
     equity_history_log_path: Path | None = None,
     now: datetime | None = None,
     symbol_source: str = "requests_config",
+    limits: Any | None = None,
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -275,7 +276,20 @@ def run_manual_trigger_stage1b_cycle(
     (CLI or direct import) that does not explicitly pass `confirmed=True`
     gets a fail-closed `Stage1BManualTriggerCliError` before any client
     is touched or any evidence is fetched, let alone before the broker is
-    reached."""
+    reached.
+
+    Extension -- 2026-09-29 (Martin, AskUserQuestion): `limits` is a new,
+    OPTIONAL keyword-only parameter, threaded straight through to `.55`'s
+    `run_stage1b_paper_cycle(limits=...)` unchanged. This module's own CLI
+    (`main()`, below) still never sets it -- a bare `.363` manual-trigger
+    run is unaffected and keeps `.44`'s dimensions unconfigured exactly as
+    before (`portfolio_limits_source` reflects whichever was actually
+    used). This parameter exists so a caller that DOES want real portfolio-
+    exposure limits enforced (first user: `.365`'s continuous live-trading
+    loop) can supply a `.344.PortfolioLimits` instance without this module
+    reimplementing anything -- `.55` already accepts and correctly applies
+    `limits`, this module just was not exposing that existing capability
+    until now."""
     if not confirmed:
         raise Stage1BManualTriggerCliError(
             "SUBMISSION_NOT_CONFIRMED:this cycle will not run without explicit confirmation "
@@ -400,7 +414,8 @@ def run_manual_trigger_stage1b_cycle(
             supervision_kwargs=supervision_kwargs,
             fill_poll_timeout_seconds=fill_poll_timeout_seconds,
             fill_poll_interval_seconds=fill_poll_interval_seconds,
-            limits=None,  # -> .355 defaults to enforcement_module.PortfolioLimits() (Martin, 2026-09-25: left unconfigured)
+            limits=limits,  # None (default) -> .355 defaults to enforcement_module.PortfolioLimits() = unconfigured,
+                            # exactly as before 2026-09-29. A caller (e.g. .365) may now supply real limits here.
             strategy_id=strategy_id, strategy_version=strategy_version,
             now=now_dt,
         )
@@ -431,7 +446,11 @@ def run_manual_trigger_stage1b_cycle(
             "for symbols skipped this cycle because they could not be sized."
         ),
         "sizing_failures": sizing_failures,
-        "portfolio_limits_source": "enforcement_module.PortfolioLimits() (defaults, left unconfigured -- Martin, 2026-09-25)",
+        "portfolio_limits_source": (
+            "enforcement_module.PortfolioLimits() (defaults, left unconfigured -- Martin, 2026-09-25)"
+            if limits is None else "caller-supplied .344.PortfolioLimits (see limits_applied below) -- Extension 2026-09-29"
+        ),
+        "limits_applied": limits.to_dict() if limits is not None else None,
         "equity_history_log_path": str(log_path),
         "equity_history_observation_count": len(equity_history),
         "equity_history_note": (

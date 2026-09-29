@@ -570,3 +570,51 @@ def test_default_strategy_id_is_not_355s_synthetic_default():
     assert M.DEFAULT_STRATEGY_ID != STAGE1.DEFAULT_STRATEGY_ID
     assert "SYNTHETIC" not in M.DEFAULT_STRATEGY_ID
     assert M.DEFAULT_STRATEGY_VERSION != STAGE1.DEFAULT_STRATEGY_VERSION
+
+
+# ============================================================================
+# 6. limits -- Extension 2026-09-29 (Martin, AskUserQuestion): threaded
+#    straight through to .55.run_stage1b_paper_cycle(limits=...), unchanged
+#    default behavior when omitted.
+# ============================================================================
+
+
+def test_limits_defaults_to_none_and_portfolio_limits_source_says_unconfigured():
+    bars_client = FakeBarsClient(bars_by_symbol={})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW,
+    )
+    assert "left unconfigured" in result["portfolio_limits_source"]
+    assert result["limits_applied"] is None
+
+
+def test_limits_supplied_is_threaded_into_stage1b_paper_cycle_call(monkeypatch):
+    captured = {}
+    real_stage1b = STAGE1.run_stage1b_paper_cycle
+
+    def _spy(symbol_requests, **kwargs):
+        captured["kwargs"] = kwargs
+        return real_stage1b(symbol_requests, **kwargs)
+
+    monkeypatch.setattr(STAGE1, "run_stage1b_paper_cycle", _spy)
+
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0, assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    limits = ENFORCE.PortfolioLimits(max_daily_loss_pct_by_venue={"ALPACA": 0.02}, max_asset_concentration_ratio=0.10)
+
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=5),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW, limits=limits,
+    )
+    assert captured["kwargs"]["limits"] is limits
+    assert "caller-supplied" in result["portfolio_limits_source"]
+    assert result["limits_applied"] == limits.to_dict()
