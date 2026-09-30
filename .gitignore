@@ -55,3 +55,15 @@ reports/
 aura-autonomous-trading-agent/stage3_scheduled_output/
 aura-autonomous-trading-agent/stage3c_output/
 aura-autonomous-trading-agent/stage3c_*.json
+
+# Generated state/output from the live-evidence CLIs (.363/.365/.369) --
+# refreshed on every run, not part of the app
+aura-autonomous-trading-agent/earnings_state/
+aura-autonomous-trading-agent/full_universe_state/
+aura-autonomous-trading-agent/news_state/
+aura-autonomous-trading-agent/stage1b_live_trader_news_state/
+aura-autonomous-trading-agent/stage1b_live_trader_output/
+aura-autonomous-trading-agent/requests-config.json
+aura-autonomous-trading-agent/scan_result.json
+aura-autonomous-trading-agent/scan_result_*.json
+aura-autonomous-trading-agent/stage3_live_test.json
