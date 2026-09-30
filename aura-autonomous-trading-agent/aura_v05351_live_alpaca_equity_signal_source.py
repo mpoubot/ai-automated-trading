@@ -292,7 +292,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 VERSION = "AURA v0.5.3.51"
 ENGINE = "LIVE_EQUITY_TECHNICAL_SIGNAL_SOURCE"
@@ -843,6 +843,101 @@ def fetch_recent_bars(
         df = df.xs(symbol, level="symbol")
     df = df.sort_index()
     return df.tail(lookback_bars)
+
+
+DEFAULT_BATCH_CHUNK_SIZE = 200
+
+
+def fetch_recent_bars_batch(
+    symbols: Sequence[str],
+    *,
+    client: BarsClient,
+    lookback_bars: int,
+    end: datetime | None = None,
+    calendar_buffer_days: int = 12,
+    chunk_size: int = DEFAULT_BATCH_CHUNK_SIZE,
+) -> dict[str, Any]:
+    """Extension -- 2026-09-30 (Martin, "full universe expansion", batched
+    bars fetches): the batched sibling of `fetch_recent_bars`, for
+    scanning far more symbols per cycle than one-HTTP-call-per-symbol can
+    reasonably support. Requests up to `chunk_size` symbols per
+    `StockBarsRequest` (Alpaca's multi-symbol bars response is already
+    what `fetch_recent_bars` was written to tolerate -- see its own
+    `df.index.levels` handling above -- this function just requests many
+    symbols at once instead of one, and splits the resulting multi-index
+    frame the same way), chunking `symbols` into batches of `chunk_size`
+    so a single request URL/payload never has to carry an unbounded
+    symbol list.
+
+    Returns `{symbol: DataFrame}` for every symbol that came back with at
+    least one bar. A symbol absent from the response (no data returned
+    for it, e.g. a newly-listed or thinly-traded name) is simply absent
+    from the returned dict -- mirroring `fetch_recent_bars` raising
+    `NO_BARS_RETURNED` for the single-symbol case, except here the
+    caller (which is iterating many symbols, not just one) checks for
+    the symbol's absence and records its own per-symbol fetch_error,
+    rather than one missing symbol raising and losing the whole batch.
+
+    A chunk-level request failure (network error, bad response) is
+    likewise never allowed to lose every OTHER chunk's data -- each
+    chunk's exception is caught, and the symbols in that chunk are just
+    absent from the result (again, the caller's per-symbol fetch_error
+    path is what surfaces this, exactly as an ordinary "no bars for this
+    symbol" outcome), matching this module's `fetch_recent_bars`
+    "programmer error still raises, ordinary fetch failure does not"
+    discipline as closely as a batched call can: `lookback_bars <= 0` is
+    still a genuine precondition failure and still raises immediately,
+    before any network call."""
+    if lookback_bars <= 0:
+        raise LiveSignalSourceError("INVALID_LOOKBACK_BARS:must be > 0")
+    if chunk_size <= 0:
+        raise LiveSignalSourceError("INVALID_CHUNK_SIZE:must be > 0")
+
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    end_dt = end or datetime.now(timezone.utc)
+    calendar_days = int(lookback_bars * 7 / 5) + calendar_buffer_days
+    start_dt = end_dt - timedelta(days=calendar_days)
+
+    symbols_list = list(symbols)
+    bars_by_symbol: dict[str, Any] = {}
+    for i in range(0, len(symbols_list), chunk_size):
+        chunk = symbols_list[i:i + chunk_size]
+        if not chunk:
+            continue
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=chunk,
+                timeframe=TimeFrame.Day,
+                start=start_dt,
+                end=end_dt,
+                feed=DataFeed.IEX,
+            )
+            response = client.get_stock_bars(request)
+            df = response.df
+        except Exception:  # noqa: BLE001 -- a chunk-level network/API failure must not lose
+            # every other chunk's already-fetched (or yet-to-fetch) data; the symbols in
+            # THIS chunk simply come back absent, handled by the caller as an ordinary
+            # per-symbol fetch failure (see docstring).
+            continue
+        if df is None or len(df) == 0:
+            continue
+        if hasattr(df.index, "levels") and len(df.index.levels) > 1:
+            for symbol in df.index.levels[0]:
+                if symbol not in chunk:
+                    continue
+                symbol_df = df.xs(symbol, level="symbol").sort_index()
+                if len(symbol_df):
+                    bars_by_symbol[symbol] = symbol_df.tail(lookback_bars)
+        elif len(chunk) == 1:
+            # Alpaca collapses the multi-index away when exactly one symbol in the
+            # chunk actually returned data -- mirrors fetch_recent_bars's own handling.
+            symbol_df = df.sort_index()
+            if len(symbol_df):
+                bars_by_symbol[chunk[0]] = symbol_df.tail(lookback_bars)
+    return bars_by_symbol
 
 
 def fetch_live_technical_regime(

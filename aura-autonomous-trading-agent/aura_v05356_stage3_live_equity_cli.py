@@ -182,7 +182,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 VERSION = "AURA v0.5.3.56"
 ENGINE = "STAGE3A_LIVE_EQUITY_CLI"
@@ -495,6 +495,35 @@ def fetch_symbol_evidence(
     except Exception as exc:  # noqa: BLE001 -- real network/broker call, classified and reported, never swallowed
         return SymbolEvidence(symbol=symbol, technical_regime=None, short_technical_regime=None, last_close=None, fetch_error=f"{type(exc).__name__}: {exc}")
 
+    return build_symbol_evidence_from_bars(
+        symbol, bars_df,
+        technical_module=technical_module, short_technical_module=short_technical_module,
+        frozen_technical_params=frozen_technical_params, frozen_short_technical_params=frozen_short_technical_params,
+        universe_version=universe_version, now=now,
+        orchestrator_module=orchestrator_module, atr_module=atr_module,
+    )
+
+
+def build_symbol_evidence_from_bars(
+    symbol: str,
+    bars_df: Any,
+    *,
+    technical_module: Any,
+    short_technical_module: Any,
+    frozen_technical_params: Any,
+    frozen_short_technical_params: Any,
+    universe_version: str,
+    now: datetime,
+    orchestrator_module: Any | None = None,
+    atr_module: Any | None = None,
+) -> SymbolEvidence:
+    """Extension -- 2026-09-30 (Martin, "full universe expansion", batched
+    bars fetches): the evidence-construction half of `fetch_symbol_evidence`,
+    split out so it can run against bars ALREADY fetched (one call per
+    symbol, as before, or a batch fetch covering many symbols at once --
+    see `fetch_symbol_evidence_batch`) without duplicating this logic.
+    `fetch_symbol_evidence` itself is unchanged in behavior: it still
+    fetches one symbol's bars and calls straight into this function."""
     technical_regime = technical_module.build_technical_regime_from_bars(
         symbol, bars_df, params=frozen_technical_params, universe_version=universe_version, now=now,
     )
@@ -515,6 +544,64 @@ def fetch_symbol_evidence(
         symbol=symbol, technical_regime=technical_regime, short_technical_regime=short_regime,
         last_close=last_close, bars_as_dicts=bars_as_dicts, atr_at_entry=atr_at_entry,
     )
+
+
+def fetch_symbol_evidence_batch(
+    symbols: Sequence[str],
+    *,
+    bars_client: Any,
+    technical_module: Any,
+    short_technical_module: Any,
+    frozen_technical_params: Any,
+    frozen_short_technical_params: Any,
+    lookback_bars: int,
+    universe_version: str,
+    now: datetime,
+    orchestrator_module: Any | None = None,
+    atr_module: Any | None = None,
+) -> dict[str, SymbolEvidence]:
+    """Extension -- 2026-09-30 (Martin, "full universe expansion", batched
+    bars fetches): drop-in replacement for calling `fetch_symbol_evidence`
+    once per symbol in a loop -- fetches bars for ALL of `symbols` via
+    `technical_module.fetch_recent_bars_batch` (a small, fixed number of
+    chunked HTTP calls instead of one call per symbol), then builds each
+    symbol's `SymbolEvidence` from its slice of the batch result via
+    `build_symbol_evidence_from_bars`, exactly as `fetch_symbol_evidence`
+    would have.
+
+    A symbol absent from the batch result (see `fetch_recent_bars_batch`'s
+    own docstring for why that happens -- no data returned, or its chunk's
+    request failed) gets a `SymbolEvidence` with `fetch_error` set, same
+    shape as `fetch_symbol_evidence`'s own no-bars-returned outcome --
+    callers that already handle `fetch_symbol_evidence`'s per-symbol
+    `fetch_error` (e.g. `.363`'s `fetch_failures` list) need no changes."""
+    bars_by_symbol = technical_module.fetch_recent_bars_batch(
+        symbols, client=bars_client, lookback_bars=lookback_bars, end=now,
+    )
+    evidence_by_symbol: dict[str, SymbolEvidence] = {}
+    for symbol in symbols:
+        bars_df = bars_by_symbol.get(symbol)
+        if bars_df is None:
+            evidence_by_symbol[symbol] = SymbolEvidence(
+                symbol=symbol, technical_regime=None, short_technical_regime=None, last_close=None,
+                fetch_error="NO_BARS_RETURNED_IN_BATCH",
+            )
+            continue
+        try:
+            evidence_by_symbol[symbol] = build_symbol_evidence_from_bars(
+                symbol, bars_df,
+                technical_module=technical_module, short_technical_module=short_technical_module,
+                frozen_technical_params=frozen_technical_params, frozen_short_technical_params=frozen_short_technical_params,
+                universe_version=universe_version, now=now,
+                orchestrator_module=orchestrator_module, atr_module=atr_module,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a per-symbol regime-build failure must not lose the
+            # rest of the batch; recorded exactly like an ordinary fetch failure.
+            evidence_by_symbol[symbol] = SymbolEvidence(
+                symbol=symbol, technical_regime=None, short_technical_regime=None, last_close=None,
+                fetch_error=f"{type(exc).__name__}: {exc}",
+            )
+    return evidence_by_symbol
 
 
 def resolve_quantity_for_symbol(

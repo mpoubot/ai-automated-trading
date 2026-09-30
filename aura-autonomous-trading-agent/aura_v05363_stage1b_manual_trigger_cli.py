@@ -204,6 +204,13 @@ def load_equity_history_log_module():
     return _load_module("aura_v05364_equity_history_log", "aura_v05364_equity_history_log.py")
 
 
+def load_full_universe_scan_module():
+    """`.369` -- Extension, 2026-09-30 ("full universe expansion"): source
+    of `refresh_full_universe_if_stale`/`build_symbol_requests_from_full_universe`,
+    consumed only when `--scan-full-universe` is supplied."""
+    return _load_module("aura_v05369_full_universe_scan", "aura_v05369_full_universe_scan.py")
+
+
 def load_earnings_calendar_module():
     """`.367` -- Extension, 2026-09-29 (Martin, "Lets go for Earnings
     blackout"). Optional: only loaded/used when the caller supplies both
@@ -276,6 +283,7 @@ def run_manual_trigger_stage1b_cycle(
     limits: Any | None = None,
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
+    full_universe_scan_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -310,7 +318,22 @@ def run_manual_trigger_stage1b_cycle(
     `.68`'s day-of blackout check with the real `.44` enforcement check
     this function already builds. Leaving either unset (the default)
     reproduces this function's original behavior exactly: no earnings
-    check at all."""
+    check at all.
+
+    Extension -- 2026-09-30 (Martin, "full universe expansion"):
+    `full_universe_scan_status` is a new, OPTIONAL keyword-only parameter
+    -- purely a pass-through dict (see `.369.FullUniverseScanState.to_dict()`)
+    for inclusion in this function's own output, unlike
+    `earnings_calendar_api_key`/`earnings_state_dir` above which this
+    function itself refreshes. The full-universe scan determines
+    `symbol_requests` itself (same role as `--scan-pinned-universe`), so
+    it is resolved by the CALLER (this module's own `main()`, or `.365`)
+    before this function ever runs, not inside it; this parameter exists
+    only so that scan's status (fresh vs. cached vs. unavailable, and the
+    resulting symbol count) is visible in this function's output for the
+    same auditability every other evidence source already gets here.
+    `None` (the default) means no full-universe scan was used this cycle
+    -- reproduces this function's original behavior exactly."""
     if not confirmed:
         raise Stage1BManualTriggerCliError(
             "SUBMISSION_NOT_CONFIRMED:this cycle will not run without explicit confirmation "
@@ -330,18 +353,24 @@ def run_manual_trigger_stage1b_cycle(
     exit_engine_module = equity_cli.load_exit_engine_module()
     position_sizing_module = equity_cli.load_position_sizing_module()
 
-    # -- Real .51/.52 evidence, one bars fetch per symbol, reused for
-    #    wave/sector-rotation/ATR (see .356's fetch_symbol_evidence). --
-    evidence_by_symbol: dict[str, Any] = {}
-    for r in symbol_requests:
-        evidence_by_symbol[r.symbol] = equity_cli.fetch_symbol_evidence(
-            r.symbol, bars_client=bars_client, technical_module=technical_module,
-            short_technical_module=short_technical_module,
-            frozen_technical_params=signal_source_module.FROZEN_TECHNICAL_PARAMS,
-            frozen_short_technical_params=signal_source_module.FROZEN_SHORT_TECHNICAL_PARAMS,
-            lookback_bars=lookback_bars, universe_version=universe_version, now=now_dt,
-            orchestrator_module=orchestrator_module, atr_module=atr_module,
-        )
+    # -- Real .51/.52 evidence. Extension -- 2026-09-30 ("full universe
+    #    expansion", batched bars fetches, Martin): a single batched fetch
+    #    covering every requested symbol (chunked internally by .351's
+    #    fetch_recent_bars_batch), not one HTTP call per symbol -- see
+    #    .356's fetch_symbol_evidence_batch. This replaces the previous
+    #    one-call-per-symbol loop for EVERY symbol source (pinned-universe,
+    #    requests-config, and full-universe alike), not just the new one:
+    #    strictly fewer network calls for the same result, so there was no
+    #    reason to keep two code paths. Reused for wave/sector-rotation/ATR
+    #    exactly as before (see .356's fetch_symbol_evidence_batch). --
+    evidence_by_symbol: dict[str, Any] = equity_cli.fetch_symbol_evidence_batch(
+        [r.symbol for r in symbol_requests], bars_client=bars_client, technical_module=technical_module,
+        short_technical_module=short_technical_module,
+        frozen_technical_params=signal_source_module.FROZEN_TECHNICAL_PARAMS,
+        frozen_short_technical_params=signal_source_module.FROZEN_SHORT_TECHNICAL_PARAMS,
+        lookback_bars=lookback_bars, universe_version=universe_version, now=now_dt,
+        orchestrator_module=orchestrator_module, atr_module=atr_module,
+    )
 
     usable_requests = [r for r in symbol_requests if evidence_by_symbol[r.symbol].fetch_error is None]
     fetch_failures = [
@@ -467,6 +496,7 @@ def run_manual_trigger_stage1b_cycle(
         "decide_kwargs_source": "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS",
         "news_ingestion_status": news_ingestion_status,
         "earnings_calendar_status": earnings_calendar_state.to_dict() if earnings_calendar_state is not None else None,
+        "full_universe_scan_status": full_universe_scan_status,
         "sector_rotation_by_symbol": {
             symbol: (ev.sector_rotation_regime.to_dict() if ev.sector_rotation_regime is not None else None)
             for symbol, ev in live_evidence_by_symbol.items()
@@ -518,8 +548,19 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                               "2026-09-29 ETF curation pass) as this "
                               "cycle's candidate pool -- quantity always auto-sized. --max-new-orders-per-cycle "
                               "still caps how many of them can actually result in a real order, via .53's "
-                              "existing ranking (unchanged). Exactly one of --requests-config or "
-                              "--scan-pinned-universe is required.")
+                              "existing ranking (unchanged). Exactly one of --requests-config, "
+                              "--scan-pinned-universe, or --scan-full-universe is required.")
+    parser.add_argument("--scan-full-universe", action="store_true",
+                         help="Extension -- 2026-09-30, full universe expansion (Martin, AskUserQuestion): "
+                              "instead of the pinned 39-symbol universe, consider EVERY tradable US-equity "
+                              "symbol Alpaca lists (via .369, tradable=True only -- no price/volume/exchange "
+                              "filter, Martin's explicit confirmed choice) as this cycle's candidate pool. "
+                              "Bars are fetched batched (.351.fetch_recent_bars_batch), not one call per "
+                              "symbol. Exactly one of --requests-config, --scan-pinned-universe, or "
+                              "--scan-full-universe is required.")
+    parser.add_argument("--full-universe-state-dir", type=Path, default=None,
+                         help="Directory for .369's persisted tradable-asset-list cache. Required when "
+                              "--scan-full-universe is supplied; ignored otherwise.")
     parser.add_argument("--max-new-orders-per-cycle", required=True, type=int,
                          help="Martin's own plan for the first run is 1. Not restricted further by this CLI "
                               "(see module docstring -- scope is controlled via --requests-config, not a "
@@ -556,11 +597,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
 
-    if bool(args.requests_config) == bool(args.scan_pinned_universe):
+    universe_mode_flags = [bool(args.requests_config), bool(args.scan_pinned_universe), bool(args.scan_full_universe)]
+    if sum(universe_mode_flags) != 1:
         print(
-            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED",
+            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED",
             file=sys.stderr,
         )
+        return 1
+    if args.scan_full_universe and args.full_universe_state_dir is None:
+        print("FAIL-CLOSED: FULL_UNIVERSE_STATE_DIR_REQUIRED_WITH_SCAN_FULL_UNIVERSE", file=sys.stderr)
         return 1
 
     try:
@@ -578,7 +623,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             earnings_module = load_earnings_calendar_module()
             earnings_calendar_api_key = earnings_module.load_fmp_api_key()
 
-        if args.scan_pinned_universe:
+        full_universe_scan_status = None
+        if args.scan_full_universe:
+            full_universe_module = load_full_universe_scan_module()
+            full_universe_state = full_universe_module.refresh_full_universe_if_stale(
+                alpaca_client=alpaca_client, state_dir=args.full_universe_state_dir, now=datetime.now(timezone.utc),
+            )
+            full_universe_scan_status = full_universe_state.to_dict()
+            symbol_requests = full_universe_module.build_symbol_requests_from_full_universe(
+                full_universe_state, equity_cli_module=equity_cli,
+            )
+            symbol_source = f"scan_full_universe:{full_universe_state.source}:{len(symbol_requests)}_symbols"
+        elif args.scan_pinned_universe:
             symbol_requests = equity_cli.build_symbol_requests_from_pinned_universe(technical_module)
             pinned_version = technical_module.load_pinned_universe().version
             symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
@@ -599,6 +655,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             equity_history_log_path=args.equity_history_log_path,
             symbol_source=symbol_source,
             earnings_calendar_api_key=earnings_calendar_api_key, earnings_state_dir=args.earnings_state_dir,
+            full_universe_scan_status=full_universe_scan_status,
         )
     except Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)

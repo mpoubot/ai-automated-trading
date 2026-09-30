@@ -344,6 +344,7 @@ def run_one_live_cycle(
     symbol_source: str = "requests_config",
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
+    full_universe_scan_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = manual_trigger_module.run_manual_trigger_stage1b_cycle(
         symbol_requests,
@@ -367,6 +368,7 @@ def run_one_live_cycle(
         limits=limits,
         earnings_calendar_api_key=earnings_calendar_api_key,
         earnings_state_dir=earnings_state_dir,
+        full_universe_scan_status=full_universe_scan_status,
     )
     result = dict(result)
     result["live_trader_engine"] = ENGINE
@@ -409,6 +411,7 @@ def run_scheduled_live_loop(
     symbol_source: str = "requests_config",
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
+    full_universe_scan_status: dict[str, Any] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -480,6 +483,7 @@ def run_scheduled_live_loop(
             symbol_source=symbol_source,
             earnings_calendar_api_key=earnings_calendar_api_key,
             earnings_state_dir=earnings_state_dir,
+            full_universe_scan_status=full_universe_scan_status,
         )
         cycle_path = scheduled_runner_module.write_cycle_result(result, output_dir=output_dir, now=now)
         executed += 1
@@ -510,12 +514,25 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--requests-config", required=False, default=None, type=Path,
                          help="JSON file: list of {symbol, asset_class, quantity}. Same format as .356/.363. "
-                              "Exactly one of --requests-config or --scan-pinned-universe is required.")
+                              "Exactly one of --requests-config, --scan-pinned-universe, or "
+                              "--scan-full-universe is required.")
     parser.add_argument("--scan-pinned-universe", action="store_true",
                          help="Scan every symbol in .51's existing pinned universe (39 symbols as of the "
                               "2026-09-29 ETF curation pass) every cycle -- "
-                              "quantity always auto-sized. Exactly one of --requests-config or "
-                              "--scan-pinned-universe is required.")
+                              "quantity always auto-sized. Exactly one of --requests-config, "
+                              "--scan-pinned-universe, or --scan-full-universe is required.")
+    parser.add_argument("--scan-full-universe", action="store_true",
+                         help="Extension -- 2026-09-30, full universe expansion (Martin, AskUserQuestion): scan "
+                              "EVERY tradable US-equity symbol Alpaca lists (via .369, tradable=True only -- no "
+                              "price/volume/exchange filter, Martin's explicit confirmed choice), resolved once "
+                              "at startup (the .369 cache itself refreshes daily; this process does not "
+                              "re-scan the asset list every 5-minute cycle). Bars are fetched batched "
+                              "(.351.fetch_recent_bars_batch) for every symbol source, not just this one. "
+                              "Exactly one of --requests-config, --scan-pinned-universe, or "
+                              "--scan-full-universe is required.")
+    parser.add_argument("--full-universe-state-dir", type=Path, default=None,
+                         help="Directory for .369's persisted tradable-asset-list cache. Required when "
+                              "--scan-full-universe is supplied; ignored otherwise.")
     parser.add_argument("--max-new-orders-per-cycle", type=int, default=DEFAULT_MAX_NEW_ORDERS_PER_CYCLE,
                          help=f"Default: {DEFAULT_MAX_NEW_ORDERS_PER_CYCLE} (Martin's confirmed 'Moderate' pace, "
                               "2026-09-29 AskUserQuestion).")
@@ -582,11 +599,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                               "is no way to pass this flag as false -- omit it to refuse to start at all.")
     args = parser.parse_args(argv)
 
-    if bool(args.requests_config) == bool(args.scan_pinned_universe):
+    universe_mode_flags = [bool(args.requests_config), bool(args.scan_pinned_universe), bool(args.scan_full_universe)]
+    if sum(universe_mode_flags) != 1:
         print(
-            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED",
+            "FAIL-CLOSED: EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED",
             file=sys.stderr,
         )
+        return 1
+    if args.scan_full_universe and args.full_universe_state_dir is None:
+        print("FAIL-CLOSED: FULL_UNIVERSE_STATE_DIR_REQUIRED_WITH_SCAN_FULL_UNIVERSE", file=sys.stderr)
         return 1
 
     manual_trigger_module = load_manual_trigger_module()
@@ -608,7 +629,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             earnings_module = manual_trigger_module.load_earnings_calendar_module()
             earnings_calendar_api_key = earnings_module.load_fmp_api_key()
 
-        if args.scan_pinned_universe:
+        full_universe_scan_status = None
+        if args.scan_full_universe:
+            full_universe_module = manual_trigger_module.load_full_universe_scan_module()
+            full_universe_state = full_universe_module.refresh_full_universe_if_stale(
+                alpaca_client=alpaca_client, state_dir=args.full_universe_state_dir, now=datetime.now(timezone.utc),
+            )
+            full_universe_scan_status = full_universe_state.to_dict()
+            symbol_requests = full_universe_module.build_symbol_requests_from_full_universe(
+                full_universe_state, equity_cli_module=equity_cli,
+            )
+            symbol_source = f"scan_full_universe:{full_universe_state.source}:{len(symbol_requests)}_symbols"
+        elif args.scan_pinned_universe:
             symbol_requests = equity_cli.build_symbol_requests_from_pinned_universe(technical_module)
             pinned_version = technical_module.load_pinned_universe().version
             symbol_source = f"scan_pinned_universe:{pinned_version}:{len(symbol_requests)}_symbols"
@@ -649,6 +681,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         f"earnings blackout gate: "
         f"{'ENABLED (state_dir=' + str(args.earnings_state_dir) + ')' if args.earnings_state_dir is not None else 'DISABLED (--earnings-state-dir not set)'}"
     )
+    if full_universe_scan_status is not None:
+        print(
+            f"full universe scan: {full_universe_scan_status['status']} "
+            f"(source={full_universe_scan_status['source']}, symbol_count={full_universe_scan_status['symbol_count']}, "
+            f"filter={full_universe_scan_status['filter_applied']})"
+        )
     print("THIS MODULE CAN SUBMIT REAL ORDERS TO YOUR ALPACA PAPER ACCOUNT, REPEATEDLY, UNTIL STOPPED.")
 
     try:
@@ -681,6 +719,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             symbol_source=symbol_source,
             earnings_calendar_api_key=earnings_calendar_api_key,
             earnings_state_dir=args.earnings_state_dir,
+            full_universe_scan_status=full_universe_scan_status,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")

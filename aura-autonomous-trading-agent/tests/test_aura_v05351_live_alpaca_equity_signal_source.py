@@ -606,6 +606,105 @@ def test_fetch_recent_bars_rejects_non_positive_lookback():
         M.fetch_recent_bars("AAPL", client=client, lookback_bars=0)
 
 
+# ============================================================================
+# 11b. Batched fetch layer -- Extension, 2026-09-30 (full universe
+# expansion, batched bars fetches).
+# ============================================================================
+
+
+def _multiindex_bars_multi(symbols, n=80, pattern=None):
+    """Same shape _multiindex_bars produces, but for several symbols
+    stacked into one multi-index frame -- mirrors what Alpaca's real
+    get_stock_bars response looks like for a multi-symbol request."""
+    frames = []
+    for symbol in symbols:
+        single = _make_bars(n, pattern=pattern or PATTERN_MILD_BULLISH)
+        single = single.reset_index().rename(columns={"index": "timestamp"})
+        single["symbol"] = symbol
+        frames.append(single.set_index(["symbol", "timestamp"]))
+    return pd.concat(frames)
+
+
+class _FakeBatchBarsClient:
+    """Returns a fixed multi-symbol response for every chunk it's asked
+    for, unless `chunk_exceptions` maps a request's symbol tuple to an
+    exception to raise instead (used to test that one bad chunk doesn't
+    lose every other chunk's data)."""
+
+    def __init__(self, df_by_chunk=None, exception_for_symbols=None):
+        self._df_by_chunk = df_by_chunk or {}
+        self._exception_for_symbols = exception_for_symbols or {}
+        self.requests = []
+
+    def get_stock_bars(self, request):
+        symbols = tuple(request.symbol_or_symbols)
+        self.requests.append(symbols)
+        if symbols in self._exception_for_symbols:
+            raise self._exception_for_symbols[symbols]
+        return _FakeBarsResponse(self._df_by_chunk[symbols])
+
+
+def test_fetch_recent_bars_batch_splits_multi_symbol_response():
+    symbols = ("AAPL", "MSFT", "NVDA")
+    df = _multiindex_bars_multi(symbols, n=100)
+    client = _FakeBatchBarsClient(df_by_chunk={symbols: df})
+    result = M.fetch_recent_bars_batch(
+        symbols, client=client, lookback_bars=80, end=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    assert set(result.keys()) == set(symbols)
+    for symbol in symbols:
+        assert len(result[symbol]) == 80
+
+
+def test_fetch_recent_bars_batch_chunks_large_symbol_lists():
+    symbols = tuple(f"SYM{i}" for i in range(5))
+    chunk_a = symbols[:2]
+    chunk_b = symbols[2:4]
+    chunk_c = symbols[4:]
+    client = _FakeBatchBarsClient(df_by_chunk={
+        chunk_a: _multiindex_bars_multi(chunk_a, n=80),
+        chunk_b: _multiindex_bars_multi(chunk_b, n=80),
+        chunk_c: _multiindex_bars_multi(chunk_c, n=80),
+    })
+    result = M.fetch_recent_bars_batch(symbols, client=client, lookback_bars=60, chunk_size=2)
+    assert len(client.requests) == 3  # 5 symbols / chunk_size=2 -> 3 chunks
+    assert set(result.keys()) == set(symbols)
+
+
+def test_fetch_recent_bars_batch_one_bad_chunk_does_not_lose_others():
+    good = ("AAPL", "MSFT")
+    bad = ("BADSYM",)
+    client = _FakeBatchBarsClient(
+        df_by_chunk={good: _multiindex_bars_multi(good, n=80)},
+        exception_for_symbols={bad: RuntimeError("simulated network failure")},
+    )
+    result = M.fetch_recent_bars_batch(good + bad, client=client, lookback_bars=60, chunk_size=2)
+    assert set(result.keys()) == set(good)
+    assert "BADSYM" not in result
+
+
+def test_fetch_recent_bars_batch_missing_symbol_simply_absent():
+    symbols = ("AAPL", "MSFT")
+    # Response only actually contains AAPL -- MSFT never traded that window.
+    df = _multiindex_bars_multi(("AAPL",), n=80)
+    client = _FakeBatchBarsClient(df_by_chunk={symbols: df})
+    result = M.fetch_recent_bars_batch(symbols, client=client, lookback_bars=60)
+    assert "AAPL" in result
+    assert "MSFT" not in result
+
+
+def test_fetch_recent_bars_batch_rejects_non_positive_lookback():
+    client = _FakeBatchBarsClient()
+    with pytest.raises(M.LiveSignalSourceError):
+        M.fetch_recent_bars_batch(("AAPL",), client=client, lookback_bars=0)
+
+
+def test_fetch_recent_bars_batch_rejects_non_positive_chunk_size():
+    client = _FakeBatchBarsClient()
+    with pytest.raises(M.LiveSignalSourceError):
+        M.fetch_recent_bars_batch(("AAPL",), client=client, lookback_bars=60, chunk_size=0)
+
+
 def test_fetch_live_technical_regime_wraps_fetch_exceptions_fail_closed():
     client = _FakeBarsClient(exception=RuntimeError("connection reset"))
     with pytest.raises(M.LiveSignalSourceError):

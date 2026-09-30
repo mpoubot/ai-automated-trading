@@ -521,7 +521,7 @@ def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_wh
     ])
     assert rc == 1
     captured = capsys.readouterr()
-    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED" in captured.err
 
 
 def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_when_both_given(tmp_path, capsys):
@@ -537,7 +537,7 @@ def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_wh
     ])
     assert rc == 1
     captured = capsys.readouterr()
-    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED" in captured.err
 
 
 def test_main_fails_closed_on_missing_credentials(tmp_path, monkeypatch, capsys):

@@ -298,7 +298,7 @@ def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_wh
     rc = M.main(argv)
     assert rc == 1
     captured = capsys.readouterr()
-    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED" in captured.err
     assert not output_path.exists()
 
 
@@ -315,7 +315,7 @@ def test_main_requires_exactly_one_of_requests_config_or_scan_pinned_universe_wh
     rc = M.main(argv)
     assert rc == 1
     captured = capsys.readouterr()
-    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_REQUIRED" in captured.err
+    assert "EXACTLY_ONE_OF_REQUESTS_CONFIG_OR_SCAN_PINNED_UNIVERSE_OR_SCAN_FULL_UNIVERSE_REQUIRED" in captured.err
     assert not output_path.exists()
 
 
