@@ -150,6 +150,20 @@ source, not from an earlier report:
     documented interface a future module can fill in, and that function
     always returns NOT_YET_IMPLEMENTED -- never a fabricated RECONCILED
     verdict (section 6).
+  - Order-payload digest check (added 2026-10): `order_request["order_spec"]`
+    is a plain dict handed back from `.336.authorized_order_request()` with
+    nothing in `.33`/`.36`/`.37` verifying it is still the same dict by the
+    time `.35.submit()` is actually called -- the gap was between
+    construction and submission being protected only by this function's
+    own "no intervening logic" discipline, never a runtime-checked
+    invariant. A SHA-256 digest of the order_spec's canonical JSON is now
+    taken immediately when `.336` returns it and recomputed immediately
+    before `.35.submit()`, failing closed (stage ORDER_PAYLOAD_INTEGRITY)
+    on any mismatch. Scoped to Alpaca only: the MEXC path has no
+    equivalent surface, since `.31.authorized_submit()` fuses claim,
+    revalidation, adapter validation, and submission into one atomic call
+    internal to `.31`/`.27`, so this module never holds an intermediate
+    MEXC order payload to begin with.
 
 ============================================================================
 3. MEXC outcome -> `.29` ledger mapping (the core new orchestration logic)
@@ -538,6 +552,7 @@ def _base_result(canonical_spec: dict[str, Any] | None) -> dict[str, Any]:
         "authorization_id": None,
         "supervised_at": now(),
         "order_spec": None,
+        "order_spec_digest": None,
         "submission_result": None,
         "intent_record": None,
     }
@@ -721,6 +736,23 @@ def supervise_alpaca_equity_execution(
         return _blocked(canonical_spec, "REVALIDATION", order_request.get("reason"), order_request.get("detail"),
                          authorization_id=record.get("authorization_id"))
 
+    # Order-payload digest (v0.5.3.?) -- a SHA-256 of the canonical JSON of
+    # the exact broker-bound order_spec `.336` just constructed, taken at
+    # the first possible moment (`.336` never computes one itself: it
+    # returns a plain dict). This is NOT a replacement for `.33`'s
+    # spec_fingerprint (which binds the DECISION) or `.37`'s
+    # authorization-id claim (which binds the AUTHORIZATION) -- neither of
+    # those covers the one thing nothing else in this chain checks:
+    # whether the literal dict handed to `.35.submit()` is still
+    # byte-identical to the one `.336` returned. Today that's true only by
+    # the "no intervening logic" discipline documented further down; this
+    # digest makes it a runtime-checked invariant instead of a
+    # code-review-only one, so a future edit that accidentally mutates
+    # `order_spec` between construction and submission fails closed
+    # instead of silently submitting a drifted order. See the matching
+    # recheck immediately before the `.35.submit()` call below.
+    order_spec_digest = sha256_text(stable_json(order_request["order_spec"]))
+
     # Second, local claim layer -- see module-level docstring immediately
     # above claim_alpaca_client_order_id(). `.37`'s authorization_id claim
     # is already permanently consumed at this point and stays that way
@@ -740,6 +772,7 @@ def supervise_alpaca_equity_execution(
     result = _base_result(canonical_spec)
     result["authorization_id"] = record.get("authorization_id")
     result["order_spec"] = order_request["order_spec"]
+    result["order_spec_digest"] = order_spec_digest
 
     if not attempt_submission:
         result["status"] = "READY_FOR_SUBMISSION"
@@ -774,10 +807,33 @@ def supervise_alpaca_equity_execution(
                              authorization_id=record.get("authorization_id"), order_spec=order_request["order_spec"])
 
     # NO intervening logic between this point and the actual .35.submit()
-    # call below -- the ceiling check immediately above is itself part of
-    # what "tightening the claim-to-submit gap" means (a fail-closed
-    # check, not additional work that could itself go stale), not a
-    # violation of it.
+    # call below, beyond the digest recheck immediately following -- the
+    # ceiling check above and this digest check are themselves part of
+    # what "tightening the claim-to-submit gap" means (fail-closed checks,
+    # not additional work that could itself go stale), not a violation of
+    # it.
+    #
+    # Order-payload digest recheck -- the other half of the invariant
+    # introduced above the local claim layer: recompute the same digest
+    # from the exact object about to be passed to `.35.submit()` and
+    # require an exact match. Always on, unlike the price/ceiling checks
+    # -- this has no external dependency (no network, no clock), it is a
+    # hash of a dict already in memory, so there is no cost or reason to
+    # make it opt-in. A mismatch means `order_spec` was mutated somewhere
+    # between construction and this point; there is no way to tell from
+    # here whether that was a bug or something adversarial, so it is
+    # treated exactly like any other fail-closed rejection: BLOCKED, no
+    # broker call, and both claims above stay consumed (never released),
+    # exactly like every other post-claim rejection in this function.
+    resubmission_digest = sha256_text(stable_json(order_request["order_spec"]))
+    if resubmission_digest != order_spec_digest:
+        return _blocked(
+            canonical_spec, "ORDER_PAYLOAD_INTEGRITY", "ORDER_PAYLOAD_DIGEST_MISMATCH",
+            "order_spec changed between authorization and submission -- refusing to submit",
+            authorization_id=record.get("authorization_id"), order_spec=order_request["order_spec"],
+            order_spec_digest=order_spec_digest, resubmission_digest=resubmission_digest,
+        )
+
     if revalidation40 is not None:
         _audit_write_best_effort(revalidation40, "record_submission_attempted",
                                   canonical_spec["client_order_id"], base_dir=audit_dir)

@@ -685,6 +685,8 @@ def test_alpaca_all_eight_combinations_construct_successfully(tmp_path) -> None:
         expect(f"23: {asset_class}/{direction}/{symbol}: READY_FOR_SUBMISSION", r["status"] == "READY_FOR_SUBMISSION")
         expect(f"23: {asset_class}/{direction}/{symbol}: order_spec constructed", r["order_spec"] is not None)
         expect(f"23: {asset_class}/{direction}/{symbol}: order_spec symbol matches", r["order_spec"]["symbol"] == symbol)
+        expect(f"23: {asset_class}/{direction}/{symbol}: order_spec_digest populated on construction-only preview too",
+               isinstance(r.get("order_spec_digest"), str) and len(r["order_spec_digest"]) == 64)
 
 
 def test_alpaca_close_short_does_not_require_fresh_borrow_evidence(tmp_path) -> None:
@@ -724,6 +726,8 @@ def test_alpaca_full_submission_path_succeeds(tmp_path) -> None:
     expect("26: exactly one submit_order call", len(client.submit_calls) == 1)
     expect("26: a .37 claim file now exists", list(d.alpaca_auth.glob("*")) != [])
     expect("26: a Supervisor-owned client_order_id claim file now exists", list(d.alpaca_supervisor.glob("*")) != [])
+    expect("26: order_spec_digest is populated on a real submission",
+           isinstance(r.get("order_spec_digest"), str) and len(r["order_spec_digest"]) == 64)
 
 
 def test_alpaca_replay_second_attempt_blocked(tmp_path) -> None:
@@ -759,6 +763,61 @@ def test_alpaca_replay_second_attempt_blocked(tmp_path) -> None:
     expect("27: the two attempts got DIFFERENT authorization_ids (proving .37 alone would not have caught this)",
            first["authorization_id"] != second["authorization_id"])
     expect("27: no second submit_order call ever happened", client2.submit_calls == [])
+
+
+def test_alpaca_order_spec_digest_mismatch_blocks_submission(tmp_path, monkeypatch) -> None:
+    """Proves the order-payload digest check is a real, wired-in runtime
+    invariant, not just documentation: inject a mutation of order_spec
+    into the exact window between the pre-submission digest (taken right
+    after `.336.authorized_order_request()` returns) and the resubmission
+    recheck (taken right before `.35.submit()`), and confirm the mismatch
+    is caught, the attempt is BLOCKED, and `.35.submit()` is never called.
+
+    The mutation is injected via `claim_alpaca_client_order_id` -- the one
+    piece of real logic this module runs between those two digest points
+    -- rather than by calling any private helper, so this test exercises
+    the real public entry point exactly like every other test in this
+    file. `authorized_order_request` is wrapped (not replaced) purely to
+    capture a reference to the SAME order_spec dict object `.338` will go
+    on to use, since dicts are mutable and passed by reference."""
+    d = Dirs(tmp_path)
+    spec = make_alpaca_spec(direction="OPEN_LONG", symbol="AAPL", decision_id="DEC-A-DIGEST")
+    asset = make_alpaca_asset(symbol="AAPL")
+    client = FakeAlpacaClient()
+
+    real_authorized_order_request = ALPACA_AUTH.authorized_order_request
+    real_claim = SUP.claim_alpaca_client_order_id
+    holder: dict = {}
+
+    def wrapped_authorized_order_request(*args, **kwargs):
+        order_request = real_authorized_order_request(*args, **kwargs)
+        if order_request.get("status") == "AUTHORIZED_ORDER_REQUEST_READY":
+            holder["order_spec"] = order_request["order_spec"]  # same object, not a copy
+        return order_request
+
+    def tampering_claim(claims_dir, client_order_id):
+        granted = real_claim(claims_dir, client_order_id)
+        if "order_spec" in holder:
+            # Mutate the live object AFTER the pre-submission digest was
+            # already taken -- simulating a future bug that accidentally
+            # touches order_spec in the "no intervening logic" window.
+            holder["order_spec"]["__tampered__"] = True
+        return granted
+
+    monkeypatch.setattr(ALPACA_AUTH, "authorized_order_request", wrapped_authorized_order_request)
+    monkeypatch.setattr(SUP, "claim_alpaca_client_order_id", tampering_claim)
+
+    r = SUP.supervise_alpaca_equity_execution(spec, asset, auth_config=alpaca_auth_config(),
+                                                attempt_submission=True, alpaca_client=client,
+                                                supervisor_config=sup_open(), **d.alpaca_kwargs())
+    expect("36: a tampered order_spec is caught and BLOCKED", r["status"] == "BLOCKED")
+    expect("36: blocked at the new ORDER_PAYLOAD_INTEGRITY stage", r["stage"] == "ORDER_PAYLOAD_INTEGRITY")
+    expect("36: reason is ORDER_PAYLOAD_DIGEST_MISMATCH", r["reason"] == "ORDER_PAYLOAD_DIGEST_MISMATCH")
+    expect("36: .35.submit() was never called", client.submit_calls == [])
+    expect("36: the two recorded digests actually differ",
+           r.get("order_spec_digest") != r.get("resubmission_digest"))
+    expect("36: both claims underneath stay consumed (never released) despite the block",
+           list(d.alpaca_auth.glob("*")) != [] and list(d.alpaca_supervisor.glob("*")) != [])
 
 
 def test_alpaca_execution_uncertain_never_guesses_rejected(tmp_path) -> None:
