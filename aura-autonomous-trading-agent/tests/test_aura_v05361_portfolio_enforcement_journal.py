@@ -178,6 +178,104 @@ def test_read_journal_skips_blank_lines():
 
 
 # ---------------------------------------------------------------------------
+# Extension -- 2026-10-01 ("lets go for #4"): build_raw_entry()/
+# record_raw_decision(), the plain-dict analogue of build_entry()/
+# record_decision() for a caller whose decision isn't .44-shaped.
+# ---------------------------------------------------------------------------
+
+def test_build_raw_entry_is_pure_and_captures_fields():
+    entry = J.build_raw_entry(
+        overall_verdict="SUBMITTED_FOR_EXECUTION", snapshot_as_of="2026-10-01T12:00:00+00:00",
+        decision={"symbol": "AAPL", "status": "BLOCKED", "stage": "SUPERVISOR_KILL_SWITCH"},
+        decision_hash="raw-hash-1", now=NOW,
+    )
+    assert entry.overall_verdict == "SUBMITTED_FOR_EXECUTION"
+    assert entry.decision_hash == "raw-hash-1"
+    assert entry.snapshot_as_of == "2026-10-01T12:00:00+00:00"
+    assert entry.decision == {"symbol": "AAPL", "status": "BLOCKED", "stage": "SUPERVISOR_KILL_SWITCH"}
+    assert entry.appended_at == NOW.isoformat()
+    assert entry.context == {}
+
+
+def test_build_raw_entry_defaults_decision_hash_to_content_sha256():
+    """No decision_hash supplied -> deterministic SHA-256 of the decision
+    dict's own canonical JSON, not None and not random -- same entry
+    content always produces the same hash."""
+    decision = {"symbol": "TSLA", "stage": "NO_TRADE_DECIDED"}
+    entry1 = J.build_raw_entry(overall_verdict="NO_TRADE_DECIDED", snapshot_as_of="2026-10-01T12:00:00+00:00",
+                                decision=decision, now=NOW)
+    entry2 = J.build_raw_entry(overall_verdict="NO_TRADE_DECIDED", snapshot_as_of="2026-10-01T12:00:00+00:00",
+                                decision=decision, now=NOW)
+    assert entry1.decision_hash is not None
+    assert entry1.decision_hash == entry2.decision_hash
+    assert len(entry1.decision_hash) == 64  # hex sha256
+
+    other = J.build_raw_entry(overall_verdict="NO_TRADE_DECIDED", snapshot_as_of="2026-10-01T12:00:00+00:00",
+                               decision={"symbol": "DIFFERENT"}, now=NOW)
+    assert other.decision_hash != entry1.decision_hash
+
+
+def test_build_raw_entry_captures_optional_context():
+    entry = J.build_raw_entry(
+        overall_verdict="ABSTAIN", snapshot_as_of="2026-10-01T12:00:00+00:00",
+        decision={"symbol": "AAPL"}, context={"source": "aura_v05355_run_stage1b_paper_cycle"}, now=NOW,
+    )
+    assert entry.context == {"source": "aura_v05355_run_stage1b_paper_cycle"}
+
+
+def test_record_raw_decision_appends_and_is_readable():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        journal_path = Path(d) / "journal.jsonl"
+        J.record_raw_decision(
+            journal_path, overall_verdict="SUBMITTED_FOR_EXECUTION", snapshot_as_of="2026-10-01T12:00:00+00:00",
+            decision={"symbol": "AAPL", "status": "FILLED"}, decision_hash="h-raw-1", now=NOW,
+        )
+        entries = J.read_journal(journal_path)
+        assert len(entries) == 1
+        assert entries[0]["overall_verdict"] == "SUBMITTED_FOR_EXECUTION"
+        assert entries[0]["decision"] == {"symbol": "AAPL", "status": "FILLED"}
+        assert entries[0]["decision_hash"] == "h-raw-1"
+
+
+def test_record_decision_and_record_raw_decision_interleave_in_one_journal():
+    """.44-shaped entries (record_decision) and plain-dict entries
+    (record_raw_decision) land in the SAME file, same append order, both
+    readable identically via read_journal() -- no second file, no second
+    format, per this extension's own design note."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        journal_path = Path(d) / "journal.jsonl"
+        J.record_decision(journal_path, _decision(verdict="ALLOW", h="h-enforcement"), now=NOW)
+        J.record_raw_decision(
+            journal_path, overall_verdict="SUBMITTED_FOR_EXECUTION", snapshot_as_of="2026-10-01T12:00:01+00:00",
+            decision={"symbol": "AAPL"}, decision_hash="h-raw", now=NOW,
+        )
+        entries = J.read_journal(journal_path)
+        assert len(entries) == 2
+        assert entries[0]["decision_hash"] == "h-enforcement"
+        assert entries[1]["decision_hash"] == "h-raw"
+
+
+def test_record_raw_decision_raises_journal_error_on_write_failure():
+    """Fail-closed on write, mirroring record_decision()'s own existing
+    discipline -- a directory path cannot be written as a file."""
+    with pytest.raises(J.JournalError):
+        J.record_raw_decision(
+            Path("/"), overall_verdict="ABSTAIN", snapshot_as_of="2026-10-01T12:00:00+00:00",
+            decision={"symbol": "AAPL"}, now=NOW,
+        )
+
+
+def test_default_journal_path_is_defined_and_under_regime_output():
+    """A real caller (.363/.365) falls back to this when it doesn't
+    supply its own path -- mirrors .364's DEFAULT_EQUITY_HISTORY_LOG_PATH
+    convention exactly."""
+    assert isinstance(J.DEFAULT_JOURNAL_PATH, Path)
+    assert str(J.DEFAULT_JOURNAL_PATH).startswith("regime_output")
+
+
+# ---------------------------------------------------------------------------
 # Independence: this module never imports or hard-depends on .44.
 # ---------------------------------------------------------------------------
 

@@ -167,6 +167,13 @@ def load_earnings_blackout_module():
     return _load_module("aura_v05368_earnings_blackout_gate", "aura_v05368_earnings_blackout_gate.py")
 
 
+def load_decision_journal_module():
+    """`.361` -- Extension, 2026-10-01 ("lets go for #4"): source of
+    `record_raw_decision()`, used by `run_stage1b_paper_cycle()` below
+    when a caller supplies `journal_path`."""
+    return _load_module("aura_v05361_portfolio_enforcement_journal", "aura_v05361_portfolio_enforcement_journal.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -705,6 +712,7 @@ def run_stage1b_paper_cycle(
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
     now: datetime | None = None,
     earnings_calendar_state: Any | None = None,
+    journal_path: Path | None = None,
 ) -> Stage1CycleReport:
     """`supervision_kwargs` MUST include an explicit `auth_config` (with
     `execution_authorized`/`paper_execution_authorized` set True -- `.36`'s
@@ -724,7 +732,26 @@ def run_stage1b_paper_cycle(
     so a symbol in blackout today is blocked the same way a
     LIMIT_BREACHED symbol is: recorded at stage `NO_TRADE_DECIDED`, never
     reaching `.38`. Leaving it `None` (the default) reproduces this
-    function's original behavior exactly: no earnings check at all."""
+    function's original behavior exactly: no earnings check at all.
+
+    `journal_path` (Extension, 2026-10-01, "lets go for #4" -- the gate-
+    refusal/no-trade audit journal from AURA_Lablab_Hackathon_Official_
+    Winners_Audit_2026-10-01.md ranked finding #4): optional, keyword-only,
+    OFF by default. `None` (the default) reproduces this function's
+    original behavior exactly -- no journal write, no `.361` import, byte-
+    for-byte unchanged for every existing caller and every existing test
+    in this file's own suite. When supplied, every `AuditRecord` this
+    function builds -- every symbol, every cycle, whether it's an asset-
+    metadata-fetch failure, an ABSTAIN/NOT_SHORTLISTED/NO_TRADE_DECIDED
+    signal, a `.44` BLOCK, a `.38` BLOCK, or an actual submission -- is
+    durably appended to `journal_path` via `.361.record_raw_decision()`,
+    unconditionally, the SAME "log every cycle, not just executed trades"
+    principle `.361` already established for `.44`'s own decisions alone.
+    This function does not choose a default path itself (unlike `.364`'s
+    own default-path convention one layer up) -- that choice belongs to
+    the caller that actually reaches a broker (`.363`), the same division
+    of responsibility `.364`'s own `equity_history_log_path` already uses
+    one layer up from here."""
     now_dt = now or datetime.now(timezone.utc)
     cycle_module = load_cycle_module()
     metadata_module = load_metadata_module()
@@ -732,6 +759,24 @@ def run_stage1b_paper_cycle(
     observability_module = load_observability_module()
     enforcement_module = load_enforcement_module()
     fill_module = load_fill_reconciliation_module()
+    journal_module = load_decision_journal_module() if journal_path is not None else None
+
+    def _journal_record(record: AuditRecord) -> None:
+        """No-op when `journal_path` was not supplied (see this function's
+        own docstring) -- the only call sites below call this
+        unconditionally, exactly the "log every cycle" discipline `.361`
+        already established, so the None-check lives in ONE place."""
+        if journal_module is None:
+            return
+        journal_module.record_raw_decision(
+            journal_path, overall_verdict=record.cycle_stage, snapshot_as_of=record.observed_at,
+            decision=record.to_dict(), decision_hash=record.decision_hash,
+            context={
+                "symbol": record.symbol, "strategy_id": record.strategy_id,
+                "strategy_version": record.strategy_version, "source": "aura_v05355_run_stage1b_paper_cycle",
+            },
+            now=now_dt,
+        )
 
     if limits is None:
         limits = enforcement_module.PortfolioLimits()
@@ -784,6 +829,8 @@ def run_stage1b_paper_cycle(
         )
         for f in metadata_fetch_failures
     ]
+    for record in metadata_records:
+        _journal_record(record)
 
     if not usable_requests:
         return Stage1CycleReport(
@@ -829,13 +876,15 @@ def run_stage1b_paper_cycle(
             asset_by_symbol[req.symbol], direction, asset_class=req.asset_class,
             adapter_module=adapter_module, metadata_module=metadata_module,
         )
-        records.append(build_audit_record(
+        record = build_audit_record(
             symbol=req.symbol, strategy_id=strategy_id, strategy_version=strategy_version, outcome=outcome,
             intended_quantity=req.quantity, reference_price_fn=reference_price_fn, shortability=shortability,
             enforcement_decision=decisions_by_symbol.get(req.symbol), fill_result=fills_by_symbol.get(req.symbol),
             resulting_position=_find_position(post_snapshot, req.symbol),
             kill_switch_engaged=kill_switch_engaged, now=now_dt,
-        ))
+        )
+        records.append(record)
+        _journal_record(record)
 
     return Stage1CycleReport(
         stage="STAGE_1B_PAPER_CYCLE", cycle_result=cycle_result, audit_records=tuple(records),

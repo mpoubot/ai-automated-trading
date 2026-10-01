@@ -46,6 +46,7 @@ ENGINE50 = _load("aura_v05350_decision_engine", ROOT / "aura_v05350_decision_eng
 CYCLE = _load("aura_v05353_full_paper_orchestration", ROOT / "aura_v05353_full_paper_orchestration.py")
 FILL = _load("aura_v05354_alpaca_equity_fill_reconciliation", ROOT / "aura_v05354_alpaca_equity_fill_reconciliation.py")
 STUB = _load("aura_v054_llm_stub", ROOT / "aura_v054_llm_stub.py")
+JOURNAL = _load("aura_v05361_portfolio_enforcement_journal", ROOT / "aura_v05361_portfolio_enforcement_journal.py")
 M = _load("aura_v05355_stage1_paper_trading_runner", ROOT / "aura_v05355_stage1_paper_trading_runner.py")
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -722,3 +723,112 @@ def test_compose_with_earnings_blackout_none_state_is_a_noop():
         return sentinel
 
     assert M._compose_with_earnings_blackout(fake_check, earnings_calendar_state=None, now_dt=NOW) is fake_check
+
+
+# ============================================================================
+# Extension -- 2026-10-01 ("lets go for #4"): optional `journal_path` wired
+# into run_stage1b_paper_cycle(). `journal_path=None` (the default) must
+# reproduce every pre-existing test's behavior byte-for-byte -- every test
+# above this section already proves that implicitly (none of them pass
+# journal_path). These tests cover the opt-in behavior itself.
+# ============================================================================
+
+
+def test_stage1b_journal_path_none_writes_no_journal_file(tmp_path):
+    """Default (journal_path omitted) must not create any journal file --
+    the no-op branch in _journal_record()."""
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "journal-off"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+    )
+    assert not (tmp_path / "journal.jsonl").exists()
+    assert not list(tmp_path.glob("**/*.jsonl"))
+
+
+def test_stage1b_journal_path_supplied_logs_submitted_decision(tmp_path):
+    journal_path = tmp_path / "journal.jsonl"
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "journal-on"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        journal_path=journal_path,
+    )
+    record = report.audit_records[0]
+    assert record.submission_status == "SUBMITTED"
+
+    entries = JOURNAL.read_journal(journal_path)
+    assert len(entries) == 1
+    assert entries[0]["decision"]["symbol"] == "AAPL"
+    assert entries[0]["overall_verdict"] == record.cycle_stage
+    assert entries[0]["snapshot_as_of"] == record.observed_at
+    assert entries[0]["decision_hash"] == record.decision_hash
+    assert entries[0]["context"]["source"] == "aura_v05355_run_stage1b_paper_cycle"
+    assert entries[0]["context"]["symbol"] == "AAPL"
+
+
+def test_stage1b_journal_path_logs_blocked_decision_not_just_submitted(tmp_path):
+    """The whole point of #4: a never-submitted symbol (short, unverified,
+    never reaches .38) must still be journaled."""
+    journal_path = tmp_path / "journal.jsonl"
+    client = FakeAlpacaClient(assets={"TSLA": FakeAsset(symbol="TSLA", shortable=False, easy_to_borrow=False)})
+    reqs = (make_request("TSLA", promotable_score=-0.9),)
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "journal-short-blocked"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        journal_path=journal_path,
+    )
+    record = report.audit_records[0]
+    assert record.submission_status != "SUBMITTED"
+
+    entries = JOURNAL.read_journal(journal_path)
+    assert len(entries) == 1
+    assert entries[0]["decision"]["symbol"] == "TSLA"
+    assert entries[0]["overall_verdict"] == record.cycle_stage
+
+
+def test_stage1b_journal_path_logs_metadata_fetch_failure(tmp_path):
+    """A symbol that never even clears asset-metadata fetch is still one
+    journal entry -- the metadata_records loop journals before the
+    early return."""
+    journal_path = tmp_path / "journal.jsonl"
+    client = FakeAlpacaClient(assets={})  # get_asset("AAPL") raises
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    report = M.run_stage1b_paper_cycle(
+        reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+        equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+        supervision_kwargs=base_supervision_kwargs(tmp_path, "journal-fetchfail"),
+        fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+        journal_path=journal_path,
+    )
+    assert report.cycle_result is None
+
+    entries = JOURNAL.read_journal(journal_path)
+    assert len(entries) == 1
+    assert entries[0]["decision"]["cycle_stage"] == "ASSET_METADATA_FETCH_FAILED"
+
+
+def test_stage1b_journal_path_appends_across_multiple_cycles(tmp_path):
+    """record_raw_decision() appends, never truncates -- two cycles against
+    the same journal_path must accumulate, not overwrite."""
+    journal_path = tmp_path / "journal.jsonl"
+    client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    reqs = (make_request("AAPL", promotable_score=0.9),)
+    for i in range(2):
+        M.run_stage1b_paper_cycle(
+            reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
+            equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
+            supervision_kwargs=base_supervision_kwargs(tmp_path, f"journal-append-{i}"),
+            fill_poll_timeout_seconds=1, fill_poll_interval_seconds=1, now=NOW,
+            journal_path=journal_path,
+        )
+    entries = JOURNAL.read_journal(journal_path)
+    assert len(entries) == 2

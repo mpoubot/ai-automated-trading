@@ -80,6 +80,7 @@ EXIT54 = _load("aura_v054_exit_engine", ROOT / "aura_v054_exit_engine.py")
 SIZING54 = _load("aura_v054_position_sizing", ROOT / "aura_v054_position_sizing.py")
 EQUITY_CLI = _load("aura_v05356_stage3_live_equity_cli", ROOT / "aura_v05356_stage3_live_equity_cli.py")
 HISTORY64 = _load("aura_v05364_equity_history_log", ROOT / "aura_v05364_equity_history_log.py")
+JOURNAL = _load("aura_v05361_portfolio_enforcement_journal", ROOT / "aura_v05361_portfolio_enforcement_journal.py")
 M = _load("aura_v05363_stage1b_manual_trigger_cli", ROOT / "aura_v05363_stage1b_manual_trigger_cli.py")
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc)
@@ -737,3 +738,109 @@ def test_cli_earnings_state_dir_without_fmp_api_key_fails_closed(tmp_path, monke
     assert "FAIL-CLOSED" in captured.err
     assert "MISSING_FMP_API_KEY" in captured.err
     assert not output_path.exists()
+
+
+# ============================================================================
+# Extension -- 2026-10-01 ("lets go for #4"): optional `decision_journal_
+# path` wired into run_manual_trigger_stage1b_cycle(). Unlike `.355`'s
+# `journal_path` (None means off), this one is NOT None-means-off -- it
+# always resolves to a real path (defaulting to `.361.DEFAULT_JOURNAL_
+# PATH`), mirroring `equity_history_log_path`'s existing always-on
+# resolve-then-report convention one layer up.
+# ============================================================================
+
+
+def test_decision_journal_path_defaults_to_361s_default_journal_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(M51, "build_technical_regime_from_bars", lambda *a, **kw: make_synthetic_confirmed_technical_regime())
+    monkeypatch.setattr(M52, "build_short_technical_regime_from_bars", lambda *a, **kw: make_synthetic_not_usable_short_regime())
+
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0, assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    history_log = tmp_path / "hist.jsonl"
+
+    import os
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        result = M.run_manual_trigger_stage1b_cycle(
+            (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+            confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+            max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+            max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+            equity_history_log_path=history_log,
+            # decision_journal_path intentionally omitted -> falls back to .361.DEFAULT_JOURNAL_PATH
+        )
+        assert result["decision_journal_path"] == str(JOURNAL.DEFAULT_JOURNAL_PATH)
+        assert (tmp_path / JOURNAL.DEFAULT_JOURNAL_PATH).exists()
+    finally:
+        os.chdir(original_cwd)
+
+
+def test_decision_journal_path_explicit_path_is_used_and_entries_written(monkeypatch, tmp_path):
+    monkeypatch.setattr(M51, "build_technical_regime_from_bars", lambda *a, **kw: make_synthetic_confirmed_technical_regime())
+    monkeypatch.setattr(M52, "build_short_technical_regime_from_bars", lambda *a, **kw: make_synthetic_not_usable_short_regime())
+
+    bars = make_bars(n=60)
+    bars_client = FakeBarsClient(bars_by_symbol={"AAPL": bars})
+    alpaca_client = FakeAlpacaClient(equity=100_000.0, assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
+    history_log = tmp_path / "hist.jsonl"
+    journal_path = tmp_path / "custom_journal.jsonl"
+
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        equity_history_log_path=history_log, decision_journal_path=journal_path,
+    )
+
+    assert result["decision_journal_path"] == str(journal_path)
+    assert result["decision_journal_entries_written"] == 1
+    entries = JOURNAL.read_journal(journal_path)
+    assert len(entries) == 1
+    assert entries[0]["decision"]["symbol"] == "AAPL"
+    assert "decision_journal_note" in result
+
+
+def test_decision_journal_entries_written_is_zero_when_no_symbol_reaches_stage1(monkeypatch, tmp_path):
+    """sizing_failures / symbol_fetch_failures short-circuit before .55 is
+    ever called -- report stays None, so entries_written must be 0, not
+    an error."""
+    bars_client = FakeBarsClient(bars_by_symbol={})  # AAPL fetch fails -> no usable_requests
+    alpaca_client = FakeAlpacaClient(equity=100_000.0)
+    journal_path = tmp_path / "journal.jsonl"
+    result = M.run_manual_trigger_stage1b_cycle(
+        (EQUITY_CLI.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None),),
+        confirmed=True, bars_client=bars_client, alpaca_client=alpaca_client,
+        max_new_orders_per_cycle=1, lookback_bars=60, universe_version=SIGSRC.UNIVERSE_VERSION,
+        max_snapshot_age_seconds=10**9, fill_poll_timeout_seconds=1.0, fill_poll_interval_seconds=1.0,
+        now=NOW, decision_journal_path=journal_path,
+    )
+    assert result["stage1_report"] is None
+    assert result["decision_journal_entries_written"] == 0
+
+
+def test_cli_decision_journal_path_argument_is_threaded_through(monkeypatch, tmp_path):
+    monkeypatch.setenv(EQUITY_CLI.EQUITY_API_KEY_ENV, "FAKE_KEY")
+    monkeypatch.setenv(EQUITY_CLI.EQUITY_SECRET_KEY_ENV, "FAKE_SECRET")
+    captured_kwargs = {}
+
+    def fake_run(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"decision_journal_path": str(kwargs.get("decision_journal_path")), "stage1_report": None}
+
+    monkeypatch.setattr(M, "run_manual_trigger_stage1b_cycle", fake_run)
+    reqs_path = make_symbol_requests_file(tmp_path, [{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}])
+    output_path = tmp_path / "out.json"
+    custom_journal = tmp_path / "custom_journal.jsonl"
+    argv = [
+        "--requests-config", str(reqs_path), "--max-new-orders-per-cycle", "1",
+        "--max-snapshot-age-seconds", "300", "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1", "--output", str(output_path),
+        "--i-confirm-this-submits-real-paper-orders",
+        "--decision-journal-path", str(custom_journal),
+    ]
+    rc = M.main(argv)
+    assert rc == 0
+    assert captured_kwargs["decision_journal_path"] == custom_journal

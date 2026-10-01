@@ -345,6 +345,7 @@ def run_one_live_cycle(
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
+    decision_journal_path: Path | None = None,
 ) -> dict[str, Any]:
     result = manual_trigger_module.run_manual_trigger_stage1b_cycle(
         symbol_requests,
@@ -369,6 +370,7 @@ def run_one_live_cycle(
         earnings_calendar_api_key=earnings_calendar_api_key,
         earnings_state_dir=earnings_state_dir,
         full_universe_scan_status=full_universe_scan_status,
+        decision_journal_path=decision_journal_path,
     )
     result = dict(result)
     result["live_trader_engine"] = ENGINE
@@ -412,6 +414,7 @@ def run_scheduled_live_loop(
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
+    decision_journal_path: Path | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -484,6 +487,7 @@ def run_scheduled_live_loop(
             earnings_calendar_api_key=earnings_calendar_api_key,
             earnings_state_dir=earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
+            decision_journal_path=decision_journal_path,
         )
         cycle_path = scheduled_runner_module.write_cycle_result(result, output_dir=output_dir, now=now)
         executed += 1
@@ -555,6 +559,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     parser.add_argument("--strategy-version", type=str, default=DEFAULT_STRATEGY_VERSION)
     parser.add_argument("--equity-history-log-path", type=Path, default=None,
                          help="Defaults to .364's own DEFAULT_EQUITY_HISTORY_LOG_PATH if omitted.")
+    parser.add_argument("--decision-journal-path", type=Path, default=None,
+                         help="Defaults to .361's own DEFAULT_JOURNAL_PATH if omitted. Every symbol every cycle "
+                              "-- ABSTAIN, a .44/.38 BLOCK, or an actual submission -- is appended here "
+                              "unconditionally (Extension, 2026-10-01).")
 
     # -- Mechanism 1: conservative portfolio limits, Martin's confirmed
     #    defaults, overridable. --
@@ -720,6 +728,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             earnings_calendar_api_key=earnings_calendar_api_key,
             earnings_state_dir=args.earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
+            decision_journal_path=args.decision_journal_path,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")

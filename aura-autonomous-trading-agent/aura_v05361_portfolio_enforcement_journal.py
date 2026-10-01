@@ -69,11 +69,24 @@ Design, and the judgment calls behind it
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+# Extension -- 2026-10-01 ("lets go for #4"): a default path, mirroring
+# `.364`'s own `DEFAULT_EQUITY_HISTORY_LOG_PATH` convention exactly (same
+# `regime_output/` root `.338` already uses for its own durable claim
+# directories), for the real caller that opts into journaling
+# (`.363`/`.365`) to fall back to when it doesn't need a different path.
+# This module's own functions (`record_decision`/`record_raw_decision`)
+# never read this constant themselves -- `journal_path` stays a required,
+# explicit argument everywhere in this file, exactly as before; only a
+# CALLER one layer up (`.363`) chooses to default to it.
+DEFAULT_JOURNAL_PATH = Path("regime_output/decision_journal/stage1b_decisions.jsonl")
 
 
 class JournalError(Exception):
@@ -148,6 +161,93 @@ def record_decision(
     docstring). Raises JournalError on write failure; on success returns
     the JournalEntry that was written."""
     entry = build_entry(decision, context=context, now=now)
+    append_entry(journal_path, entry)
+    return entry
+
+
+# ----------------------------------------------------------------------- #
+# Extension -- 2026-10-01 (Martin, "lets go for #4", AURA_Lablab_Hackathon_
+# Official_Winners_Audit_2026-10-01.md ranked finding #4: three independent
+# hackathon teams -- EdgeStack, Killswitch Capital, and this journal's own
+# original design above -- converge on "log every symbol every cycle, not
+# just the ones that traded". That principle was already implemented here
+# for `.44`'s own EnforcementDecision; it was NOT usable by any OTHER
+# decision-producer in this repo (`.338`'s own execution-level outcomes --
+# kill switch / auth failure / replay rejection / EXECUTION_UNCERTAIN /
+# submitted -- and `.355`'s own per-symbol AuditRecord, which already
+# folds `.350`'s signal decision, `.44`'s enforcement verdict, and `.338`'s
+# supervision result into ONE row per symbol per cycle) because
+# `build_entry()` above hard-requires an object shaped exactly like `.44`'s
+# `EnforcementDecision` (`.decision_hash`/`.overall_verdict`/
+# `.snapshot_as_of`/`.to_dict()`).
+#
+# `build_raw_entry()`/`record_raw_decision()` are a second, parallel entry
+# point into the SAME journal file and the SAME `JournalEntry` shape --
+# for a caller whose decision is a plain dict, not a duck-typed object.
+# This is pure addition: `JournalEntry`, `build_entry()`, `append_entry()`,
+# `record_decision()`, and `read_journal()` above are byte-for-byte
+# unchanged, so every existing `.44`-journaling caller (and this module's
+# own pre-existing tests) is unaffected. Entries from both entry points
+# interleave in the same file in append order, in the same shape
+# (`read_journal()` reads either kind identically) -- distinguishable by
+# `context`/`decision` contents, not by a different file or format.
+# ----------------------------------------------------------------------- #
+
+
+def build_raw_entry(
+    *,
+    overall_verdict: str,
+    snapshot_as_of: str,
+    decision: dict[str, Any],
+    decision_hash: str | None = None,
+    context: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> JournalEntry:
+    """Pure (no I/O) -- the `build_entry()` analogue for a plain-dict
+    decision instead of a duck-typed `.44`-shaped object. `decision` is
+    stored as-is (already a `dict`, e.g. `.355.AuditRecord.to_dict()` or a
+    `.338` result dict) -- this function does not interpret or validate
+    its contents beyond requiring it round-trip through `json.dumps`.
+
+    `decision_hash`, when the caller has no better one of its own (e.g.
+    `.355`'s `AuditRecord.decision_hash`, itself `.350`'s own signal-
+    decision hash when reached, else `None`), defaults to a SHA-256 of
+    `decision`'s own canonical JSON -- same `stable_json`/`sha256_text`
+    convention `.338` itself already uses, so every entry in this journal
+    always has SOME content-derived hash, never a bare `None` unless the
+    caller explicitly passes one."""
+    now = now or datetime.now(timezone.utc)
+    if decision_hash is None:
+        canonical = json.dumps(decision, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        decision_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return JournalEntry(
+        appended_at=now.isoformat(),
+        decision_hash=decision_hash,
+        overall_verdict=overall_verdict,
+        snapshot_as_of=snapshot_as_of,
+        decision=dict(decision),
+        context=dict(context or {}),
+    )
+
+
+def record_raw_decision(
+    journal_path: Path,
+    *,
+    overall_verdict: str,
+    snapshot_as_of: str,
+    decision: dict[str, Any],
+    decision_hash: str | None = None,
+    context: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> JournalEntry:
+    """`build_raw_entry()` + `append_entry()` in one call -- the
+    `record_decision()` analogue for a caller whose decision is a plain
+    dict. Raises `JournalError` on write failure (via `append_entry()`,
+    unchanged); on success returns the `JournalEntry` that was written."""
+    entry = build_raw_entry(
+        overall_verdict=overall_verdict, snapshot_as_of=snapshot_as_of, decision=decision,
+        decision_hash=decision_hash, context=context, now=now,
+    )
     append_entry(journal_path, entry)
     return entry
 

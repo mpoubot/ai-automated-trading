@@ -848,3 +848,122 @@ def test_main_earnings_state_dir_supplied_without_fmp_key_fails_closed_before_an
     assert "FAIL-CLOSED" in captured.err
     assert "MISSING_FMP_API_KEY" in captured.err
     assert manual.cycle_calls == []  # no cycle ever ran -- failed before the loop started
+
+
+# ============================================================================
+# Extension -- 2026-10-01 ("lets go for #4"): optional `decision_journal_
+# path` threaded through run_one_live_cycle() -> .363, and through
+# run_scheduled_live_loop() -> run_one_live_cycle() for every iteration --
+# same shape as the earnings-kwargs threading tests just above.
+# ============================================================================
+
+
+def test_run_one_live_cycle_threads_decision_journal_path_into_manual_trigger_call():
+    manual = FakeManualTriggerModule()
+    M.run_one_live_cycle(
+        manual_trigger_module=manual,
+        symbol_requests=manual.equity_cli.symbol_requests,
+        bars_client="FAKE_BARS_CLIENT",
+        alpaca_client=manual.equity_cli.alpaca_client,
+        max_new_orders_per_cycle=1,
+        lookback_bars=55,
+        universe_version="TEST_UNIVERSE_VERSION",
+        max_snapshot_age_seconds=300.0,
+        fill_poll_timeout_seconds=1.0,
+        fill_poll_interval_seconds=1.0,
+        limits=object(),
+        now=NOW,
+        decision_journal_path=Path("/tmp/fake-decision-journal.jsonl"),
+    )
+    call = manual.cycle_calls[0]
+    assert call["decision_journal_path"] == Path("/tmp/fake-decision-journal.jsonl")
+
+
+def test_run_one_live_cycle_decision_journal_path_defaults_to_none():
+    manual = FakeManualTriggerModule()
+    M.run_one_live_cycle(
+        manual_trigger_module=manual,
+        symbol_requests=manual.equity_cli.symbol_requests,
+        bars_client="FAKE_BARS_CLIENT",
+        alpaca_client=manual.equity_cli.alpaca_client,
+        max_new_orders_per_cycle=1,
+        lookback_bars=55,
+        universe_version="TEST_UNIVERSE_VERSION",
+        max_snapshot_age_seconds=300.0,
+        fill_poll_timeout_seconds=1.0,
+        fill_poll_interval_seconds=1.0,
+        limits=object(),
+        now=NOW,
+    )
+    call = manual.cycle_calls[0]
+    assert call["decision_journal_path"] is None
+
+
+def test_run_scheduled_live_loop_threads_decision_journal_path_into_every_cycle_call(tmp_path):
+    manual = FakeManualTriggerModule()
+    client = FakeAlpacaClient(is_open=True)
+    journal_path = tmp_path / "decision_journal.jsonl"
+    M.run_scheduled_live_loop(**_loop_kwargs(
+        manual, client, tmp_path, max_iterations=3, decision_journal_path=journal_path,
+    ))
+    assert len(manual.cycle_calls) == 3
+    for call in manual.cycle_calls:
+        assert call["decision_journal_path"] == journal_path
+
+
+def test_main_decision_journal_path_argument_is_threaded_through(monkeypatch, tmp_path):
+    manual = FakeManualTriggerModule()
+    monkeypatch.setattr(M, "load_manual_trigger_module", lambda: manual)
+    monkeypatch.setattr(M, "load_scheduled_runner_module", lambda: STAGE357)
+    monkeypatch.setattr(M, "load_enforcement_module", lambda: ENFORCE)
+
+    captured_kwargs: dict = {}
+
+    def fake_loop(**kwargs):
+        captured_kwargs.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(M, "run_scheduled_live_loop", fake_loop)
+
+    config_path = tmp_path / "requests.json"
+    config_path.write_text('[{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}]')
+    journal_path = tmp_path / "decision_journal.jsonl"
+    rc = M.main([
+        "--requests-config", str(config_path),
+        "--max-snapshot-age-seconds", "300",
+        "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1",
+        "--max-iterations", "1",
+        "--i-confirm-this-runs-unattended-live-paper-trading",
+        "--decision-journal-path", str(journal_path),
+    ])
+    assert rc == 0
+    assert captured_kwargs["decision_journal_path"] == journal_path
+
+
+def test_main_decision_journal_path_omitted_defaults_to_none(monkeypatch, tmp_path):
+    manual = FakeManualTriggerModule()
+    monkeypatch.setattr(M, "load_manual_trigger_module", lambda: manual)
+    monkeypatch.setattr(M, "load_scheduled_runner_module", lambda: STAGE357)
+    monkeypatch.setattr(M, "load_enforcement_module", lambda: ENFORCE)
+
+    captured_kwargs: dict = {}
+
+    def fake_loop(**kwargs):
+        captured_kwargs.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(M, "run_scheduled_live_loop", fake_loop)
+
+    config_path = tmp_path / "requests.json"
+    config_path.write_text('[{"symbol": "AAPL", "asset_class": "STOCK", "quantity": 1}]')
+    rc = M.main([
+        "--requests-config", str(config_path),
+        "--max-snapshot-age-seconds", "300",
+        "--fill-poll-timeout-seconds", "1",
+        "--fill-poll-interval-seconds", "1",
+        "--max-iterations", "1",
+        "--i-confirm-this-runs-unattended-live-paper-trading",
+    ])
+    assert rc == 0
+    assert captured_kwargs["decision_journal_path"] is None

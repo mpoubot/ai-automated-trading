@@ -204,6 +204,16 @@ def load_equity_history_log_module():
     return _load_module("aura_v05364_equity_history_log", "aura_v05364_equity_history_log.py")
 
 
+def load_decision_journal_module():
+    """`.361` -- Extension, 2026-10-01 ("lets go for #4"): source of
+    `DEFAULT_JOURNAL_PATH`, used here as this module's own default when a
+    caller doesn't supply `decision_journal_path`. `.55.run_stage1b_paper_
+    cycle()` itself does the actual journaling (via `.361.record_raw_
+    decision()`), one row per `AuditRecord`; this module just decides
+    which path."""
+    return _load_module("aura_v05361_portfolio_enforcement_journal", "aura_v05361_portfolio_enforcement_journal.py")
+
+
 def load_full_universe_scan_module():
     """`.369` -- Extension, 2026-09-30 ("full universe expansion"): source
     of `refresh_full_universe_if_stale`/`build_symbol_requests_from_full_universe`,
@@ -284,6 +294,7 @@ def run_manual_trigger_stage1b_cycle(
     earnings_calendar_api_key: str | None = None,
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
+    decision_journal_path: Path | None = None,
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -333,7 +344,23 @@ def run_manual_trigger_stage1b_cycle(
     resulting symbol count) is visible in this function's output for the
     same auditability every other evidence source already gets here.
     `None` (the default) means no full-universe scan was used this cycle
-    -- reproduces this function's original behavior exactly."""
+    -- reproduces this function's original behavior exactly.
+
+    Extension -- 2026-10-01 (Martin, "lets go for #4", AURA_Lablab_
+    Hackathon_Official_Winners_Audit_2026-10-01.md ranked finding #4):
+    `decision_journal_path` is a new, OPTIONAL keyword-only parameter.
+    UNLIKE every other optional parameter above, this one is NOT None-
+    means-off -- it defaults to `.361.DEFAULT_JOURNAL_PATH` when omitted,
+    the SAME "a real broker-reaching caller journals unconditionally,
+    without needing an opt-in flag" convention `equity_history_log_path`/
+    `.364` already established one parameter above. Every symbol this
+    cycle produces an `AuditRecord` for -- a metadata-fetch failure, an
+    ABSTAIN/NOT_SHORTLISTED/NO_TRADE_DECIDED signal, a `.44` BLOCK, a
+    `.38` BLOCK, or an actual submission -- is durably journaled via
+    `.55.run_stage1b_paper_cycle(journal_path=...)`. To disable journaling
+    entirely for a given call, a caller would need to call `.55` directly
+    with `journal_path=None` -- this module's own CLI (`main()`, below)
+    never does that; a bare `.363` manual-trigger run always journals."""
     if not confirmed:
         raise Stage1BManualTriggerCliError(
             "SUBMISSION_NOT_CONFIRMED:this cycle will not run without explicit confirmation "
@@ -426,6 +453,14 @@ def run_manual_trigger_stage1b_cycle(
     #    cycle" principle) -- never gated on the eventual decision. --
     equity_history_module = load_equity_history_log_module()
     log_path = equity_history_log_path or equity_history_module.DEFAULT_EQUITY_HISTORY_LOG_PATH
+
+    # -- Decision journal (Extension, 2026-10-01, "lets go for #4") --
+    #    resolved here (not inside .55) so this function's own output can
+    #    report which path was actually used, mirroring equity_history_
+    #    log_path's identical resolve-then-report pattern immediately
+    #    above. --
+    journal_module = load_decision_journal_module()
+    journal_path = decision_journal_path or journal_module.DEFAULT_JOURNAL_PATH
     equity_history: list[dict[str, Any]] = []
     if account_equity_usd is not None:
         equity_history = equity_history_module.record_and_read_equity_history(
@@ -483,6 +518,7 @@ def run_manual_trigger_stage1b_cycle(
             strategy_id=strategy_id, strategy_version=strategy_version,
             now=now_dt,
             earnings_calendar_state=earnings_calendar_state,
+            journal_path=journal_path,
         )
 
     return {
@@ -525,6 +561,16 @@ def run_manual_trigger_stage1b_cycle(
             "enforcement check ran, then the full same-day history was passed to .44's daily_loss check -- see "
             ".364's module docstring. equity_history_observation_count==0 means no real equity was fetched this "
             "run (see account_equity_usd_source); daily_loss will BLOCK in that case (INSUFFICIENT_HISTORY)."
+        ),
+        "decision_journal_path": str(journal_path),
+        "decision_journal_entries_written": len(report.audit_records) if report is not None else 0,
+        "decision_journal_note": (
+            "Extension, 2026-10-01: every AuditRecord .55 built this cycle (metadata-fetch failures, ABSTAIN/"
+            "NOT_SHORTLISTED/NO_TRADE_DECIDED signals, .44 BLOCKs, .38 BLOCKs, and actual submissions alike) was "
+            "appended to the path above via .361.record_raw_decision() -- see .361's module docstring, Extension "
+            "2026-10-01. decision_journal_entries_written==0 here means no symbol reached .55 at all this cycle "
+            "(every symbol failed evidence fetch or sizing first -- see symbol_fetch_failures/sizing_failures), "
+            "not that nothing happened."
         ),
         "stage1_report": equity_cli._stage1_report_to_dict(report, stage1_module) if report is not None else None,
     }
@@ -590,6 +636,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                               "(regime_output/equity_history_log/alpaca_equity_history.jsonl) if omitted. "
                               "This run's real equity is appended here (see module docstring, 'Daily-loss "
                               "history') so .44's daily_loss check has a genuine same-day-prior snapshot.")
+    parser.add_argument("--decision-journal-path", type=Path, default=None,
+                         help="Defaults to .361's own DEFAULT_JOURNAL_PATH "
+                              "(regime_output/decision_journal/stage1b_decisions.jsonl) if omitted. Every symbol "
+                              "this cycle produces an AuditRecord for -- ABSTAIN, a .44/.38 BLOCK, or an actual "
+                              "submission -- is appended here unconditionally (Extension, 2026-10-01).")
     parser.add_argument("--i-confirm-this-submits-real-paper-orders", dest="confirmed", action="store_true",
                          required=True,
                          help="REQUIRED. This run can submit a real order to your Alpaca PAPER account. There "
@@ -656,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             symbol_source=symbol_source,
             earnings_calendar_api_key=earnings_calendar_api_key, earnings_state_dir=args.earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
+            decision_journal_path=args.decision_journal_path,
         )
     except Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
