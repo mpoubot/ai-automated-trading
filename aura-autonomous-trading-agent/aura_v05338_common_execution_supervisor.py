@@ -344,6 +344,41 @@ CLOSE_LONG/CLOSE_SHORT decision is itself a new execution attempt and is
 blocked by the kill switch exactly like an OPEN, consistent with every
 other module in this chain.
 
+Static kill switch -- Extension, 2026-10-01 (Martin, AskUserQuestion,
+referencing the Lablab/Alpaca Hackathon Official Winners Audit)
+------------------------------------------------------------------------
+The kill switch described above (SUPERVISOR_DEFAULT_CONFIG/
+supervisor_config) is a single layer: any caller can clear it simply by
+passing `supervisor_config={"kill_switch": False}` as a plain function
+argument -- exactly what `.363`/`.365` already do to reach real
+submission. That audit found PRISM (1st place) implements a SECOND,
+static layer that the dynamic layer structurally cannot clear --
+`app/autonomous/control.py::set_kill_switch` refuses to deactivate the
+dynamic switch while the static, config-level one is still engaged, so
+clearing it requires an actual deployment/configuration change, never an
+application-layer call. `.338` had no equivalent until now.
+
+`static_kill_switch_engaged()` reads the `AURA_338_STATIC_KILL_SWITCH`
+environment variable at call time (not cached, not threaded through any
+config dict) and is checked FIRST in both `supervise_alpaca_equity_
+execution()` and `supervise_mexc_futures_execution()` -- before `cfg =
+load_supervisor_config(...)` is even evaluated, so no value any caller
+supplies (via `supervisor_config` or anything else) can influence it.
+Unset, or set to one of `""`/`"0"`/`"false"`/`"no"`/`"off"`
+(case-insensitive) = not engaged, reproducing every existing behavior
+and every existing test byte-for-byte. Set to anything else = engaged,
+both venues blocked at stage SUPERVISOR_KILL_SWITCH, reason
+STATIC_KILL_SWITCH_ENGAGED -- before the dynamic kill switch is even
+read. Clearing it means unsetting (or explicitly zeroing) the
+environment variable in the process's own environment -- not something
+reachable from inside this module's own call graph, matching PRISM's
+guarantee. Same scope as the dynamic kill switch: blocks only NEW
+execution attempts on either venue (construction-only preview calls
+included, exactly like the dynamic switch already does -- see above),
+never `supervise_mexc_reconciliation_pass()` or
+`observe_and_reconcile_alpaca_equity_execution()`, for the same reason
+given above.
+
 ============================================================================
 6. What this module deliberately does NOT do
 ============================================================================
@@ -385,6 +420,13 @@ ALLOWED_ENVIRONMENTS = frozenset({"PAPER"})
 
 SUPERVISOR_DEFAULT_CONFIG: dict[str, Any] = {"kill_switch": True}
 
+# Static, deployment-level kill switch -- see module docstring, "Static
+# kill switch" section. Independent of SUPERVISOR_DEFAULT_CONFIG/
+# supervisor_config: no caller-supplied dict can clear this, only a
+# change to the process's own environment can.
+STATIC_KILL_SWITCH_ENV_VAR = "AURA_338_STATIC_KILL_SWITCH"
+_STATIC_KILL_SWITCH_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+
 DEFAULT_MEXC_AUTH_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/mexc_authorization_claims")
 DEFAULT_MEXC_ADAPTER_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/mexc_adapter_claims")
 DEFAULT_MEXC_LEDGER_DIR = Path("regime_output/common_execution_supervisor/mexc_intent_ledger")
@@ -415,6 +457,22 @@ def load_supervisor_config(overrides: dict[str, Any] | None = None) -> dict[str,
             if key in overrides:
                 config[key] = overrides[key]
     return config
+
+
+def static_kill_switch_engaged() -> bool:
+    """The static, deployment-level kill switch -- see module docstring,
+    "Static kill switch". Read from the environment at call time (never
+    cached, never threaded through `supervisor_config` or any other
+    caller-supplied argument). Unset, or set to one of the explicit "off"
+    spellings in `_STATIC_KILL_SWITCH_OFF_VALUES` (case-insensitive,
+    surrounding whitespace ignored), returns False -- every existing
+    behavior and every existing test is byte-for-byte unchanged. Set to
+    anything else returns True, and no value any caller passes anywhere
+    in this module's public functions can turn that back to False."""
+    value = os.environ.get(STATIC_KILL_SWITCH_ENV_VAR)
+    if value is None:
+        return False
+    return value.strip().lower() not in _STATIC_KILL_SWITCH_OFF_VALUES
 
 
 # --------------------------------------------------------------------- #
@@ -652,6 +710,14 @@ def supervise_alpaca_equity_execution(
     does, so THIS function is where those two responsibilities live for
     the Alpaca path, mirroring `.31.authorized_submit()`'s identical
     responsibilities on the MEXC path one layer down."""
+    if static_kill_switch_engaged():
+        return _blocked(
+            canonical_spec if isinstance(canonical_spec, dict) else None,
+            "SUPERVISOR_KILL_SWITCH", "STATIC_KILL_SWITCH_ENGAGED",
+            f"{STATIC_KILL_SWITCH_ENV_VAR} is set in the process environment -- this overrides any "
+            f"supervisor_config value and cannot be cleared by any caller; unset it in the deployment "
+            f"environment to resume.",
+        )
     cfg = load_supervisor_config(supervisor_config)
     auth_claims_dir = auth_claims_dir or DEFAULT_ALPACA_AUTH_CLAIMS_DIR
     supervisor_claims_dir = supervisor_claims_dir or DEFAULT_ALPACA_CLIENT_ORDER_ID_CLAIMS_DIR
@@ -1028,6 +1094,14 @@ def supervise_mexc_futures_execution(
     `supervise_alpaca_equity_execution()`'s docstring). Every one defaults
     to None, and when every one is None this function's behavior is
     byte-for-byte unchanged from before v0.5.3.40."""
+    if static_kill_switch_engaged():
+        return _blocked(
+            canonical_spec if isinstance(canonical_spec, dict) else None,
+            "SUPERVISOR_KILL_SWITCH", "STATIC_KILL_SWITCH_ENGAGED",
+            f"{STATIC_KILL_SWITCH_ENV_VAR} is set in the process environment -- this overrides any "
+            f"supervisor_config value and cannot be cleared by any caller; unset it in the deployment "
+            f"environment to resume.",
+        )
     cfg = load_supervisor_config(supervisor_config)
     auth_claims_dir = auth_claims_dir or DEFAULT_MEXC_AUTH_CLAIMS_DIR
     adapter_claims_dir = adapter_claims_dir or DEFAULT_MEXC_ADAPTER_CLAIMS_DIR

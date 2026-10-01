@@ -281,6 +281,94 @@ def test_supervisor_kill_switch_blocks_new_execution_both_venues(tmp_path) -> No
            r2["status"] == "BLOCKED" and r2["stage"] == "SUPERVISOR_KILL_SWITCH")
 
 
+def test_static_kill_switch_overrides_caller_supplied_dynamic_config(tmp_path, monkeypatch) -> None:
+    """Extension -- 2026-10-01 (Martin, AskUserQuestion, referencing the
+    Lablab/Alpaca Hackathon Official Winners Audit): the whole point of
+    the static kill switch is that NO value a caller passes in
+    `supervisor_config` can clear it -- prove that directly by explicitly
+    opening the dynamic kill switch (kill_switch=False, i.e. sup_open())
+    while the static one is engaged, and confirm it still blocks, on
+    both venues."""
+    d = Dirs(tmp_path)
+    monkeypatch.setenv("AURA_338_STATIC_KILL_SWITCH", "1")
+
+    r1 = SUP.supervise_mexc_futures_execution(make_mexc_spec(direction="OPEN_LONG"),
+                                                supervisor_config=sup_open(), **d.mexc_kwargs())
+    expect("4c: MEXC still blocked by the STATIC kill switch despite an explicitly-open dynamic config",
+           r1["status"] == "BLOCKED" and r1["stage"] == "SUPERVISOR_KILL_SWITCH")
+    expect("4c: reason is STATIC_KILL_SWITCH_ENGAGED, distinguishable from the dynamic one",
+           r1["reason"] == "STATIC_KILL_SWITCH_ENGAGED")
+
+    r2 = SUP.supervise_alpaca_equity_execution(make_alpaca_spec(), make_alpaca_asset(),
+                                                 supervisor_config=sup_open(), **d.alpaca_kwargs())
+    expect("4d: Alpaca still blocked by the STATIC kill switch despite an explicitly-open dynamic config",
+           r2["status"] == "BLOCKED" and r2["stage"] == "SUPERVISOR_KILL_SWITCH")
+    expect("4d: reason is STATIC_KILL_SWITCH_ENGAGED",
+           r2["reason"] == "STATIC_KILL_SWITCH_ENGAGED")
+
+    expect("4e: no auth claim files exist on either venue -- blocked before any claim is attempted",
+           (not d.alpaca_auth.exists() or not list(d.alpaca_auth.glob("*")))
+           and (not d.mexc_auth.exists() or not list(d.mexc_auth.glob("*"))))
+
+
+def test_static_kill_switch_off_spellings_do_not_engage(tmp_path, monkeypatch) -> None:
+    """Every explicit 'off' spelling (case-insensitive, whitespace-
+    tolerant) must reproduce today's unset-env-var behavior exactly --
+    this is what keeps this an additive, non-breaking change."""
+    d = Dirs(tmp_path)
+    for off_value in ("", "0", "false", "FALSE", "  False  ", "no", "NO", "off", "Off"):
+        monkeypatch.setenv("AURA_338_STATIC_KILL_SWITCH", off_value)
+        r = SUP.supervise_mexc_futures_execution(make_mexc_spec(direction="OPEN_LONG"),
+                                                    supervisor_config=sup_open(), **d.mexc_kwargs())
+        expect(f"4f: off-spelling {off_value!r} does not engage the static kill switch "
+               f"(blocked for an unrelated/later reason is fine, SUPERVISOR_KILL_SWITCH+"
+               f"STATIC_KILL_SWITCH_ENGAGED specifically is not)",
+               not (r["status"] == "BLOCKED" and r["stage"] == "SUPERVISOR_KILL_SWITCH"
+                    and r["reason"] == "STATIC_KILL_SWITCH_ENGAGED"))
+
+
+def test_static_kill_switch_unset_reproduces_existing_behavior(tmp_path, monkeypatch) -> None:
+    """No env var set at all (the real default, every environment this
+    module has run in before this change) -- confirms this extension is
+    genuinely additive, not just its own off-spellings."""
+    d = Dirs(tmp_path)
+    monkeypatch.delenv("AURA_338_STATIC_KILL_SWITCH", raising=False)
+    r1 = SUP.supervise_mexc_futures_execution(make_mexc_spec(direction="OPEN_LONG"),
+                                                supervisor_config=sup_open(), **d.mexc_kwargs())
+    r2 = SUP.supervise_alpaca_equity_execution(make_alpaca_spec(), make_alpaca_asset(),
+                                                 supervisor_config=sup_open(), **d.alpaca_kwargs())
+    expect("4g: MEXC unaffected when the env var is unset entirely",
+           not (r1["status"] == "BLOCKED" and r1.get("reason") == "STATIC_KILL_SWITCH_ENGAGED"))
+    expect("4h: Alpaca unaffected when the env var is unset entirely",
+           not (r2["status"] == "BLOCKED" and r2.get("reason") == "STATIC_KILL_SWITCH_ENGAGED"))
+
+
+def test_mexc_reconciliation_not_gated_by_static_kill_switch(tmp_path, monkeypatch) -> None:
+    """Same carve-out as the dynamic kill switch: reconciliation is pure
+    observation of what already happened, never a new order, so the
+    static switch must not block it either -- mirrors
+    test_mexc_reconciliation_pass_not_gated_by_supervisor_kill_switch's
+    own setup exactly, just engaging the STATIC switch instead."""
+    d = Dirs(tmp_path)
+    spec = make_mexc_spec(direction="OPEN_LONG", decision_id="DEC-MEXC-RECONCILE-STATIC-KILLSWITCH")
+    fake_submit = FakeSubmissionExchange(create_order_result={"id": "mexc-order-static-kstest", "status": "open"})
+    SUP.supervise_mexc_futures_execution(
+        spec, auth_config=mexc_auth_config(), attempt_submission=True, exchange=fake_submit,
+        supervisor_config=sup_open(), **d.mexc_kwargs(),
+    )
+    raw_order = {
+        "externalOid": spec["client_order_id"], "orderId": "mexc-order-static-kstest", "state": "4",
+        "vol": "0.01", "dealVol": "0", "dealAvgPrice": None, "updateTime": None,
+    }
+    fake_obs = FakeObservationExchange(orders=[raw_order])
+    monkeypatch.setenv("AURA_338_STATIC_KILL_SWITCH", "1")
+    result = SUP.supervise_mexc_reconciliation_pass(
+        spec["client_order_id"], ledger_base_dir=d.mexc_ledger, exchange=fake_obs,
+    )
+    expect("4i: reconciliation succeeds even though the STATIC kill switch is engaged",
+           result["status"] == "RECONCILED")
+
+
 def test_live_environment_structurally_unsupported_for_alpaca(tmp_path) -> None:
     d = Dirs(tmp_path)
     r = SUP.supervise_alpaca_equity_execution(make_alpaca_spec(), make_alpaca_asset(), environment="LIVE",
