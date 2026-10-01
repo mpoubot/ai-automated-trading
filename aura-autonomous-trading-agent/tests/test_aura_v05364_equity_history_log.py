@@ -123,4 +123,9 @@ def test_record_and_read_accumulates_across_calls(tmp_path):
 
 
 def test_default_log_path_is_under_regime_output():
-    assert str(M.DEFAULT_EQUITY_HISTORY_LOG_PATH) == "regime_output/equity_history_log/alpaca_equity_history.jsonl"
+    # Fix, 2026-10-01: compare as a Path (or via as_posix()), not a hardcoded
+    # forward-slash string -- str(Path(...)) renders with the OS's native
+    # separator (backslash on Windows), so the old literal-string comparison
+    # failed on Windows even though the path itself was correct.
+    assert M.DEFAULT_EQUITY_HISTORY_LOG_PATH == Path("regime_output/equity_history_log/alpaca_equity_history.jsonl")
+    assert M.DEFAULT_EQUITY_HISTORY_LOG_PATH.as_posix() == "regime_output/equity_history_log/alpaca_equity_history.jsonl"

@@ -182,6 +182,11 @@ def _load_module(module_name: str, filename: str):
 
         spec = importlib.util.spec_from_file_location(module_name, ROOT / filename)
         mod = importlib.util.module_from_spec(spec)
+        # Fix, 2026-10-01 (Python 3.14 compatibility): register the module in
+        # sys.modules BEFORE exec_module -- see .355's own _load_module for
+        # the full explanation (frozen+slots dataclasses need this for
+        # ClassVar detection under Python 3.14's dataclasses internals).
+        sys.modules[module_name] = mod
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
 

@@ -91,6 +91,7 @@ numbers" discipline extended to costs.
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,15 @@ def _load_module(module_name: str, filename: str):
 
         spec = importlib.util.spec_from_file_location(module_name, ROOT / filename)
         mod = importlib.util.module_from_spec(spec)
+        # Fix, 2026-10-01 (Python 3.14 compatibility): register the module in
+        # sys.modules BEFORE exec_module -- a frozen+slots dataclass defined
+        # in the loaded module needs sys.modules.get(cls.__module__) to
+        # resolve during class creation (Python 3.14's dataclasses internals
+        # use it for ClassVar detection); without this line present, that
+        # lookup returns None and dataclass() raises AttributeError. Matches
+        # the convention every test file's own `_load()` helper already
+        # uses in this repo.
+        sys.modules[module_name] = mod
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
 
