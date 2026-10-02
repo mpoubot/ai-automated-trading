@@ -231,6 +231,28 @@ def load_enforcement_module():
     return _load_module("aura_v05344_portfolio_exposure_enforcement", "aura_v05344_portfolio_exposure_enforcement.py")
 
 
+def load_cross_awareness_guard_module():
+    """`.371` -- DELTAX cross-awareness pre/post-cycle guard. Opt-in: a
+    complete no-op unless `shared_intent_path` is supplied (see module
+    docstring addendum, Extension 2026-10-02)."""
+    return _load_module("aura_v05371_deltax_aware_cycle_guard", "aura_v05371_deltax_aware_cycle_guard.py")
+
+
+def load_shared_intent_module():
+    """`.370` -- the shared JSONL execution-intent log (read/write/lock
+    logic), the identical byte-for-byte copy DELTAX's own repo also
+    carries, both pointed at the same path on disk via
+    `AURA_DELTAX_SHARED_INTENT_PATH` / `shared_intent_path`."""
+    return _load_module("aura_v05370_shared_execution_intent", "aura_v05370_shared_execution_intent.py")
+
+
+def load_observability_module():
+    """`.343` -- source of `fetch_alpaca_portfolio`, used by `.371` to
+    snapshot AURA's own ALPACA notional before/after a cycle. Not
+    modified anywhere in this file."""
+    return _load_module("aura_v05343_portfolio_exposure_observability", "aura_v05343_portfolio_exposure_observability.py")
+
+
 def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
 
@@ -420,6 +442,9 @@ def run_scheduled_live_loop(
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
     decision_journal_path: Path | None = None,
+    shared_intent_path: Path | None = None,
+    shared_intent_max_age_seconds: float = 600.0,
+    combined_alpaca_notional_ratio_limit: float | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -469,6 +494,31 @@ def run_scheduled_live_loop(
             sleep_fn(interval_seconds)
             continue
 
+        # -- Extension, 2026-10-02: DELTAX cross-awareness pre-cycle check.
+        #    Complete no-op (proceed=True, empty evidence) unless
+        #    `shared_intent_path` is supplied -- see `.371`'s own module
+        #    docstring. Runs entirely OUTSIDE `.344`'s own enforcement
+        #    path, as an extra, independent, skip-the-whole-cycle layer,
+        #    the same way the kill switch and daily order cap above
+        #    already skip a cycle without touching `.344` at all. --
+        guard = load_cross_awareness_guard_module()
+        shared_intent_mod = load_shared_intent_module()
+        observability_mod = load_observability_module()
+        proceed, ca_reason, ca_evidence = guard.pre_cycle_check(
+            observability_module=observability_mod,
+            shared_intent_module=shared_intent_mod,
+            alpaca_client=alpaca_client,
+            shared_intent_path=shared_intent_path,
+            max_age_seconds=shared_intent_max_age_seconds,
+            combined_alpaca_notional_ratio_limit=combined_alpaca_notional_ratio_limit,
+            now=now,
+        )
+        if not proceed:
+            log_fn(f"{_now_iso(now)} CROSS_AWARENESS_SKIP: {ca_reason} | {ca_evidence}")
+            sleep_fn(interval_seconds)
+            continue
+        before_snapshot = guard.snapshot_alpaca_notional(observability_mod, alpaca_client)
+
         result = run_one_live_cycle(
             manual_trigger_module=manual_trigger_module,
             symbol_requests=symbol_requests,
@@ -494,6 +544,18 @@ def run_scheduled_live_loop(
             full_universe_scan_status=full_universe_scan_status,
             decision_journal_path=decision_journal_path,
         )
+
+        # -- Extension, 2026-10-02: DELTAX cross-awareness post-cycle
+        #    record. No-op unless `shared_intent_path` is supplied. --
+        guard.post_cycle_record(
+            observability_module=observability_mod,
+            shared_intent_module=shared_intent_mod,
+            alpaca_client=alpaca_client,
+            shared_intent_path=shared_intent_path,
+            before_snapshot=before_snapshot,
+            now=now,
+        )
+
         cycle_path = scheduled_runner_module.write_cycle_result(result, output_dir=output_dir, now=now)
         executed += 1
 
