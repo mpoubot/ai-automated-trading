@@ -159,6 +159,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -643,6 +644,31 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                          help="Default: 0.10 (10%%, Martin's confirmed value, 2026-09-29 AskUserQuestion).")
     parser.add_argument("--max-net-exposure-ratio", type=float, default=0.50,
                          help="Default: 0.50 (50%%, Martin's confirmed value, 2026-09-29 AskUserQuestion).")
+    parser.add_argument("--max-leverage-ratio-alpaca", type=float, default=2.0,
+                         help="Default: 2.0 (200%% of equity, Martin's confirmed value, 2026-10-02 "
+                              "AskUserQuestion). Applied to the ALPACA venue via "
+                              ".344.PortfolioLimits.max_leverage_ratio_by_venue -- a gross-notional-vs-equity "
+                              "ceiling that already covers DELTAX's option positions too, since .343 reads the "
+                              "whole account with no filtering by symbol or asset class.")
+
+    # -- Extension, 2026-10-02: DELTAX cross-awareness (see CROSS_AWARENESS_SETUP.md). Omit
+    #    --shared-intent-path (and the AURA_DELTAX_SHARED_INTENT_PATH env var) to leave this
+    #    entirely inert -- the default below reproduces this module's pre-existing behavior. --
+    parser.add_argument("--shared-intent-path", type=Path, default=None,
+                         help="Path to the shared DELTAX/AURA execution-intent JSONL log (see "
+                              "CROSS_AWARENESS_SETUP.md). Defaults to the AURA_DELTAX_SHARED_INTENT_PATH "
+                              "environment variable if this flag is omitted. Omit both to leave cross-awareness "
+                              "entirely inert.")
+    parser.add_argument("--shared-intent-max-age-seconds", type=float, default=600.0,
+                         help="Default: 600.0 (10 minutes). How far back .371 looks in the shared intent log for "
+                              "DELTAX's recent pending risk.")
+    parser.add_argument("--combined-alpaca-notional-ratio-limit", type=float, default=2.0,
+                         help="Default: 2.0 (same as --max-leverage-ratio-alpaca, Martin's confirmed value, "
+                              "2026-10-02 AskUserQuestion). The new cross-awareness pre-check (.371): AURA's own "
+                              "ALPACA notional PLUS DELTAX's recently-submitted-but-not-yet-filled risk, combined, "
+                              "as a ratio of equity -- skips the cycle entirely (no new orders attempted) if "
+                              "exceeded. Only takes effect when --shared-intent-path (or "
+                              "AURA_DELTAX_SHARED_INTENT_PATH) is set; otherwise this value is never read.")
 
     # -- Mechanism 2: file-based kill switch. --
     parser.add_argument("--kill-switch-file", type=Path, default=DEFAULT_KILL_SWITCH_PATH,
@@ -742,7 +768,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         max_drawdown_pct_by_venue={"ALPACA": args.max_drawdown_pct},
         max_asset_concentration_ratio=args.max_asset_concentration_ratio,
         max_net_exposure_ratio=args.max_net_exposure_ratio,
+        max_leverage_ratio_by_venue={"ALPACA": args.max_leverage_ratio_alpaca},
     )
+
+    # -- Extension, 2026-10-02: DELTAX cross-awareness. --shared-intent-path wins if supplied;
+    #    otherwise fall back to the AURA_DELTAX_SHARED_INTENT_PATH environment variable (the
+    #    same variable DELTAX's own execute.py/run.py already read). Neither set -> None,
+    #    which keeps .371's guard a complete no-op, exactly as before this change. --
+    shared_intent_path = args.shared_intent_path
+    if shared_intent_path is None:
+        _env_intent_path = os.environ.get("AURA_DELTAX_SHARED_INTENT_PATH", "")
+        shared_intent_path = Path(_env_intent_path) if _env_intent_path else None
 
     print(
         f"{VERSION} starting UNATTENDED LIVE (paper) trading loop -- interval={args.interval_seconds}s, "
@@ -755,6 +791,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     print(
         f"earnings blackout gate: "
         f"{'ENABLED (state_dir=' + str(args.earnings_state_dir) + ')' if args.earnings_state_dir is not None else 'DISABLED (--earnings-state-dir not set)'}"
+    )
+    print(
+        f"DELTAX cross-awareness: "
+        f"{'ENABLED (shared_intent_path=' + str(shared_intent_path) + ', combined_alpaca_notional_ratio_limit=' + str(args.combined_alpaca_notional_ratio_limit) + ')' if shared_intent_path is not None else 'DISABLED (no --shared-intent-path and AURA_DELTAX_SHARED_INTENT_PATH not set)'}"
     )
     if full_universe_scan_status is not None:
         print(
@@ -796,6 +836,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             earnings_state_dir=args.earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
             decision_journal_path=args.decision_journal_path,
+            shared_intent_path=shared_intent_path,
+            shared_intent_max_age_seconds=args.shared_intent_max_age_seconds,
+            combined_alpaca_notional_ratio_limit=args.combined_alpaca_notional_ratio_limit,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")

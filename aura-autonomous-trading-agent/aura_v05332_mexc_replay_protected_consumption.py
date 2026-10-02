@@ -192,8 +192,36 @@ def claim(authorization_id: str, client_order_id: str, spec_fingerprint: str | N
     }
     record["claim_hash"] = canonical_claim_hash(record)
 
+    # Fix, 2026-10-02 (Windows store-unreachable misclassification): the
+    # directory-creation step and the claim-file-open step are now TWO
+    # separate try/except blocks, not one. Previously, any FileExistsError
+    # from EITHER step -- mkdir or os.open -- was read as "this
+    # authorization_id was already claimed." That is only ever true for
+    # the os.open() on `path` itself. On Windows specifically,
+    # `path.parent.mkdir(parents=True, exist_ok=True)` can raise
+    # FileExistsError for a reason that has nothing to do with the claim
+    # file (e.g. a FILE blocking an intermediate path component -- Windows
+    # surfaces this via pathlib's own parents=True retry hitting that
+    # blocking path, where POSIX instead raises NotADirectoryError) --
+    # under the old single try/except, that got misclassified as
+    # ALREADY_CLAIMED instead of CLAIM_STORE_UNREACHABLE, exactly the
+    # fail-closed distinction this function's own docstring says callers
+    # must be able to tell apart. Any failure to even create/reach the
+    # claims directory is unconditionally CLAIM_STORE_UNREACHABLE now,
+    # regardless of its exception type; only a FileExistsError on the
+    # actual target claim file can mean ALREADY_CLAIMED.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return {
+            "granted": False,
+            "authorization_id": authorization_id,
+            "client_order_id": None,
+            "existing_intent_id": None,
+            "reason": "CLAIM_STORE_UNREACHABLE",
+        }
+
+    try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         # This authorization_id was already claimed -- exclusivity itself

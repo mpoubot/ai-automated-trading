@@ -277,7 +277,16 @@ class _FileLock:
             try:
                 self._fd = os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Fix, 2026-10-02 (Windows concurrency): same class of bug
+                # as v0.5.3.29's/.40's own _FileLock -- on Windows, a
+                # second thread racing this same O_CREAT|O_EXCL open can
+                # surface PermissionError (WinError 5) instead of
+                # FileExistsError in the narrow window where the winning
+                # thread's os.open() has created the file but not yet
+                # released its handle. Both mean "someone else currently
+                # holds this lock": retry until the timeout, never fail
+                # immediately.
                 if time.monotonic() >= deadline:
                     raise RegistryError(f"LOCK_TIMEOUT:{self._lock_path}")
                 time.sleep(0.02)

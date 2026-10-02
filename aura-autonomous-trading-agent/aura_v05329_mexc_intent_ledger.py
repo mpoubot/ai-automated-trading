@@ -343,7 +343,17 @@ class _FileLock:
             try:
                 self._fd = os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Fix, 2026-10-02 (Windows concurrency): on POSIX, a second
+                # thread racing this same O_CREAT|O_EXCL open always gets
+                # FileExistsError. On Windows, the identical "someone else
+                # currently holds this lock" condition can instead surface
+                # as PermissionError (WinError 5 / ERROR_ACCESS_DENIED) in
+                # the narrow window where the winning thread's os.open()
+                # has created the file but not yet released its handle --
+                # NTFS enforces a sharing violation there rather than a
+                # plain "already exists." Both mean the same thing for this
+                # lock: retry until the timeout, never fail immediately.
                 if time.monotonic() >= deadline:
                     fail(f"LOCK_TIMEOUT:{self._lock_path}")
                 time.sleep(0.02)
