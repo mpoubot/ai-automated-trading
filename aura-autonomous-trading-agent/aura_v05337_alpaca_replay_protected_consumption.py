@@ -437,8 +437,31 @@ def claim(authorization_record: dict[str, Any], claims_dir: Path | None = None,
     except RuntimeError as exc:
         return _denied(authorization_id, "INVALID_AUTHORIZATION_RECORD", str(exc))
 
+    # Fix, 2026-10-03 (Windows store-unreachable misclassification, same
+    # pattern as .332 on 2026-10-02): the directory-creation step and the
+    # claim-file-open step are now TWO separate try/except blocks, not one.
+    # Previously, any FileExistsError from EITHER step -- mkdir or os.open
+    # -- fell into the exclusivity-race branch below. That branch's own
+    # logic is correct for the os.open() case (it decides who won on the
+    # ACTUAL claim file), but a FileExistsError from mkdir() means
+    # something else entirely: on Windows specifically,
+    # path.parent.mkdir(parents=True, exist_ok=True) can still raise
+    # FileExistsError for a reason that has nothing to do with the claim
+    # file (e.g. a FILE blocking an intermediate path component -- Windows
+    # surfaces this via pathlib's own parents=True retry hitting that
+    # blocking path, where POSIX instead raises NotADirectoryError). Under
+    # the old single try/except, that got misclassified as an
+    # exclusivity-race outcome instead of CLAIM_STORE_UNREACHABLE. Any
+    # failure to even create/reach the claims directory is unconditionally
+    # CLAIM_STORE_UNREACHABLE now, regardless of its exception type; only a
+    # FileExistsError on the actual target claim file (from os.open()) can
+    # mean an exclusivity-race outcome.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _denied(authorization_id, "CLAIM_STORE_UNREACHABLE", None)
+
+    try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         # Exclusivity is already decided -- this call lost the race. What
