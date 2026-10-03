@@ -203,6 +203,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -761,6 +762,24 @@ def claim_authorization(claims_dir: Path, authorization_id: str) -> bool:
         return True
     except FileExistsError:
         return False
+    except PermissionError:
+        # Fix, 2026-10-03: on Windows, the identical O_CREAT|O_EXCL race
+        # that raises FileExistsError on POSIX can instead raise
+        # PermissionError (WinError 5) in the narrow window before the
+        # winning thread's handle is released. Unlike a disposable lock
+        # file, this is the actual claim record, so PermissionError here
+        # is genuinely ambiguous -- it could mean a real race-win (the
+        # same thing as FileExistsError) OR an unrelated permission/disk
+        # failure, which must NOT be silently treated as "already
+        # claimed." Disambiguate with a bounded existence check on the
+        # real target path before deciding which it is.
+        deadline = time.monotonic() + 1.0
+        while True:
+            if claim_path.exists():
+                return False  # the race really was "already claimed"
+            if time.monotonic() >= deadline:
+                raise  # genuine, unrelated failure -- fail closed, never silently grant or deny
+            time.sleep(0.005)
 
 
 def revalidate_before_submission(record: dict[str, Any], execution_spec: dict[str, Any],

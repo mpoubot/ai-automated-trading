@@ -221,20 +221,15 @@ def claim(authorization_id: str, client_order_id: str, spec_fingerprint: str | N
             "reason": "CLAIM_STORE_UNREACHABLE",
         }
 
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        # This authorization_id was already claimed -- exclusivity itself
-        # is already decided and correct at this point (O_CREAT|O_EXCL on
-        # the target path is what just failed). What remains is reading
-        # back WHICH client_order_id won, for the caller's
-        # existing_intent_id -- and that read can race the winner's own
-        # content write (the winner's os.open() created an empty file an
-        # instant before it writes the JSON body), so a bounded retry
-        # loop is used here rather than treating a transient empty/
-        # unparsable read as "no existing claim." This never affects who
-        # WON the claim -- only how quickly this refusal can report back
-        # whose claim it was.
+    def _read_back_existing_client_order_id() -> str | None:
+        # Reads back WHICH client_order_id won an already-decided
+        # exclusivity loss, for the caller's existing_intent_id -- and
+        # that read can race the winner's own content write (the winner's
+        # os.open() created an empty file an instant before it writes the
+        # JSON body), so a bounded retry loop is used here rather than
+        # treating a transient empty/unparsable read as "no existing
+        # claim." This never affects who WON the claim -- only how
+        # quickly a refusal can report back whose claim it was.
         existing_client_order_id = None
         deadline = time.monotonic() + 1.0
         while True:
@@ -248,11 +243,53 @@ def claim(authorization_id: str, client_order_id: str, spec_fingerprint: str | N
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.005)
+        return existing_client_order_id
+
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # This authorization_id was already claimed -- exclusivity itself
+        # is already decided and correct at this point (O_CREAT|O_EXCL on
+        # the target path is what just failed).
         return {
             "granted": False,
             "authorization_id": authorization_id,
             "client_order_id": None,
-            "existing_intent_id": existing_client_order_id,
+            "existing_intent_id": _read_back_existing_client_order_id(),
+            "reason": "ALREADY_CLAIMED",
+        }
+    except PermissionError:
+        # Fix, 2026-10-03: on Windows, the identical O_CREAT|O_EXCL race
+        # that raises FileExistsError on POSIX can instead raise
+        # PermissionError (WinError 5) in the narrow window before the
+        # winning thread's handle is released. This is genuinely
+        # ambiguous -- it could mean a real race-win (the same thing as
+        # FileExistsError above) OR an unrelated permission/disk failure,
+        # which must still surface as CLAIM_STORE_UNREACHABLE, never be
+        # silently read as "already claimed." A bounded existence check
+        # on the real target path decides which it is.
+        existence_deadline = time.monotonic() + 1.0
+        claim_exists = False
+        while True:
+            if path.exists():
+                claim_exists = True
+                break
+            if time.monotonic() >= existence_deadline:
+                break
+            time.sleep(0.005)
+        if not claim_exists:
+            return {
+                "granted": False,
+                "authorization_id": authorization_id,
+                "client_order_id": None,
+                "existing_intent_id": None,
+                "reason": "CLAIM_STORE_UNREACHABLE",
+            }
+        return {
+            "granted": False,
+            "authorization_id": authorization_id,
+            "client_order_id": None,
+            "existing_intent_id": _read_back_existing_client_order_id(),
             "reason": "ALREADY_CLAIMED",
         }
     except OSError:

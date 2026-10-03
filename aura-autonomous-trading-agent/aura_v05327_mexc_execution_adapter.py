@@ -95,6 +95,7 @@ import argparse
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -309,6 +310,24 @@ def claim_client_order_id(claims_dir: Path, client_order_id: str) -> bool:
         fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
+    except PermissionError:
+        # Fix, 2026-10-03: on Windows, the identical O_CREAT|O_EXCL race
+        # that raises FileExistsError on POSIX can instead raise
+        # PermissionError (WinError 5) in the narrow window before the
+        # winning thread's handle is released. Unlike a disposable lock
+        # file, this is the actual claim record, so PermissionError here
+        # is genuinely ambiguous -- it could mean a real race-win (the
+        # same thing as FileExistsError) OR an unrelated permission/disk
+        # failure, which must NOT be silently treated as "already
+        # claimed." Disambiguate with a bounded existence check on the
+        # real target path before deciding which it is.
+        deadline = time.monotonic() + 1.0
+        while True:
+            if claim_path.exists():
+                return False  # the race really was "already claimed"
+            if time.monotonic() >= deadline:
+                raise  # genuine, unrelated failure -- fail closed, never silently grant or deny
+            time.sleep(0.005)
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps({"client_order_id": client_order_id, "claimed_at": now()}))
     return True

@@ -521,6 +521,26 @@ def create_intent(
     except FileExistsError:
         fail(f"INTENT_ALREADY_EXISTS:{client_order_id}")
         raise  # unreachable
+    except PermissionError:
+        # Fix, 2026-10-03: on Windows, the identical O_CREAT|O_EXCL race
+        # that raises FileExistsError on POSIX can instead raise
+        # PermissionError (WinError 5) in the narrow window before the
+        # winning thread's handle is released. Unlike the disposable
+        # _FileLock above (already fixed 2026-10-02), this os.open() is on
+        # the actual intent record, so PermissionError here is genuinely
+        # ambiguous: it could mean a real race-win (the same thing as
+        # FileExistsError) OR an unrelated permission/disk failure, which
+        # must NOT be silently reported as "already exists." Disambiguate
+        # with a bounded existence check on the real target path.
+        deadline = time.monotonic() + 1.0
+        while True:
+            if path.exists():
+                fail(f"INTENT_ALREADY_EXISTS:{client_order_id}")
+                raise  # unreachable
+            if time.monotonic() >= deadline:
+                fail(f"INTENT_STORE_UNREACHABLE:{client_order_id}")
+                raise  # unreachable
+            time.sleep(0.005)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2, ensure_ascii=False, allow_nan=False)
         f.write("\n")

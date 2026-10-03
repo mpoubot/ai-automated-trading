@@ -461,14 +461,13 @@ def claim(authorization_record: dict[str, Any], claims_dir: Path | None = None,
     except OSError:
         return _denied(authorization_id, "CLAIM_STORE_UNREACHABLE", None)
 
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        # Exclusivity is already decided -- this call lost the race. What
-        # remains is reading back WHO won (module docstring item 0: the
-        # winner's os.open() creates an empty file an instant before it
-        # writes the JSON body, so a bounded retry loop is used rather
-        # than treating a transient empty/unparsable read as "no claim").
+    def _resolve_race_outcome() -> dict[str, Any]:
+        # Exclusivity is already decided at the point this is called --
+        # this process lost the race. What remains is reading back WHO
+        # won (module docstring item 0: the winner's os.open() creates an
+        # empty file an instant before it writes the JSON body, so a
+        # bounded retry loop is used rather than treating a transient
+        # empty/unparsable read as "no claim").
         existing: dict[str, Any] | None = None
         deadline = time.monotonic() + retry_deadline_seconds
         while True:
@@ -483,12 +482,12 @@ def claim(authorization_record: dict[str, Any], claims_dir: Path | None = None,
             time.sleep(0.005)
 
         if existing is None:
-            # The file exists (FileExistsError proves that) but its
-            # content never became verifiable within the retry window --
-            # either still racing indefinitely (should not happen in
-            # practice) or genuinely corrupted/tampered. Either way: fail
-            # closed, never silently grant, and be honest that the prior
-            # claimant's identity could not be confirmed.
+            # The file exists but its content never became verifiable
+            # within the retry window -- either still racing indefinitely
+            # (should not happen in practice) or genuinely corrupted/
+            # tampered. Either way: fail closed, never silently grant,
+            # and be honest that the prior claimant's identity could not
+            # be confirmed.
             return _denied(authorization_id, "ALREADY_CLAIMED_RECORD_UNVERIFIABLE",
                             "existing claim file could not be read and verified within the retry window")
 
@@ -501,6 +500,34 @@ def claim(authorization_record: dict[str, Any], claims_dir: Path | None = None,
                             existing_claim=existing)
 
         return _denied(authorization_id, "ALREADY_CLAIMED", None, existing_claim=existing)
+
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # Exclusivity is already decided -- this call lost the race.
+        return _resolve_race_outcome()
+    except PermissionError:
+        # Fix, 2026-10-03: on Windows, the identical O_CREAT|O_EXCL race
+        # that raises FileExistsError on POSIX can instead raise
+        # PermissionError (WinError 5) in the narrow window before the
+        # winning thread's handle is released. This is genuinely
+        # ambiguous -- it could mean a real race-win (the same thing as
+        # FileExistsError above) OR an unrelated permission/disk failure,
+        # which must still surface as CLAIM_STORE_UNREACHABLE, never be
+        # silently read as "already claimed." A bounded existence check
+        # on the real target path decides which it is.
+        existence_deadline = time.monotonic() + retry_deadline_seconds
+        claim_exists = False
+        while True:
+            if path.exists():
+                claim_exists = True
+                break
+            if time.monotonic() >= existence_deadline:
+                break
+            time.sleep(0.005)
+        if not claim_exists:
+            return _denied(authorization_id, "CLAIM_STORE_UNREACHABLE", None)
+        return _resolve_race_outcome()
     except OSError:
         # Store unreachable (permissions, disk, missing mount, etc.) --
         # fail closed, never treat this as "available to claim."
