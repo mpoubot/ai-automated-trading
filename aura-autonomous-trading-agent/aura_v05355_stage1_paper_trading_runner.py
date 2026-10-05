@@ -177,6 +177,16 @@ def load_earnings_blackout_module():
     return _load_module("aura_v05368_earnings_blackout_gate", "aura_v05368_earnings_blackout_gate.py")
 
 
+def load_earnings_blackout_horizon_module():
+    # Extension, 2026-10-05 (Martin): a second, independent earnings check
+    # alongside `.368`'s day-of block -- blocks a NEW entry whose MAX_HOLD_
+    # BARS-length hold would run THROUGH an earnings date, not just today.
+    # Composed in `_compose_with_earnings_blackout` below via `.368`'s own
+    # `combine_enforcement_check_fns`, reusing the same `earnings_calendar_
+    # state` already plumbed through this module -- no new parameter.
+    return _load_module("aura_v05372_earnings_blackout_horizon_check", "aura_v05372_earnings_blackout_horizon_check.py")
+
+
 def load_decision_journal_module():
     """`.361` -- Extension, 2026-10-01 ("lets go for #4"): source of
     `record_raw_decision()`, used by `run_stage1b_paper_cycle()` below
@@ -506,7 +516,9 @@ def _compose_with_earnings_blackout(
     earnings_module = load_earnings_blackout_module()
     as_of_date = earnings_module.market_date_from_utc(now_dt)
     earnings_check_fn = earnings_module.build_earnings_blackout_check_fn(earnings_calendar_state, as_of_date=as_of_date)
-    return earnings_module.combine_enforcement_check_fns(enforcement_check_fn, earnings_check_fn)
+    horizon_module = load_earnings_blackout_horizon_module()
+    horizon_check_fn = horizon_module.build_earnings_blackout_horizon_check_fn(earnings_calendar_state, as_of_date=as_of_date)
+    return earnings_module.combine_enforcement_check_fns(enforcement_check_fn, earnings_check_fn, horizon_check_fn)
 
 
 # ============================================================================

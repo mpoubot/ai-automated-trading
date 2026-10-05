@@ -633,9 +633,16 @@ class FakeEarningsCalendarState:
 
 
 def test_stage1b_earnings_calendar_ok_no_blackout_still_submits(tmp_path):
+    # Extension, 2026-10-05: with `.372`'s horizon check now composed in
+    # alongside `.368` (see `_compose_with_earnings_blackout`), "not today"
+    # is no longer sufficient by itself -- the date must also fall OUTSIDE
+    # the horizon window (33 calendar days from `now`/2026-09-23 by
+    # default) for a submission to still go through. 2026-12-01 is well
+    # past that window, so this still tests what it originally meant to
+    # test: a clear symbol submits normally.
     client = FakeAlpacaClient(assets={"AAPL": FakeAsset(symbol="AAPL", shortable=True, easy_to_borrow=True)})
     reqs = (make_request("AAPL", promotable_score=0.9),)
-    calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 10, 1),)})  # not today
+    calendar_state = FakeEarningsCalendarState(calendar_by_symbol={"AAPL": (_date(2026, 12, 1),)})  # not today, outside the horizon window
     report = M.run_stage1b_paper_cycle(
         reqs, alpaca_client=client, decide_kwargs=decide_kwargs(), max_new_orders_per_cycle=5,
         equity_history=equity_history_fixture(), max_snapshot_age_seconds=10**9, reference_price_fn=reference_price_fn,
