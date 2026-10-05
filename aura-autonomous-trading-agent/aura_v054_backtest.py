@@ -99,6 +99,8 @@ class TradeRecord:
     planned_risk_dollars: float
     market_value: float
     period: str  # "RESEARCH" or "HOLDOUT" -- by the ENTRY bar's segment
+    mfe_frac: float | None = None  # max favorable excursion, fractional return from entry -- already computed by EXIT.simulate_atr_trailing_trade, just not previously threaded through (added 2026-10-04, Martin-approved)
+    mae_frac: float | None = None  # max adverse excursion, fractional return from entry (negative) -- same source/rationale as mfe_frac
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,11 +151,19 @@ class BacktestReport:
 class BacktestConfig:
     """Every value here is either CONFIRMED (universe/version), or
     EXPLICITLY_SELECTED / BASELINE_RESEARCH_HYPOTHESIS per Martin's .54
-    spec (2026-09-15) -- none is optimized, none is claimed best."""
+    spec (2026-09-15) -- none is optimized, none is claimed best.
+
+    `early_trail_atr_mult` / `early_stage_r_threshold` are the
+    CANDIDATE_CHANGE approved 2026-10-04 (see
+    aura_v054_exit_engine.py's module-level comment for the full
+    validation trail). Set BOTH to None to reproduce the original
+    uniform-TRAIL_ATR_MULT exit engine exactly."""
 
     trail_atr_mult: float = EXIT.TRAIL_ATR_MULT
     take_profit_pct: float | None = EXIT.TAKE_PROFIT_PCT
     max_hold_bars: int = EXIT.MAX_HOLD_BARS
+    early_trail_atr_mult: float | None = EXIT.EARLY_TRAIL_ATR_MULT
+    early_stage_r_threshold: float | None = EXIT.EARLY_STAGE_R_THRESHOLD
     risk_fraction_per_trade: float = SIZING.RISK_FRACTION_PER_TRADE
     cost_model: COST.CostModel = field(default_factory=COST.FlatRoundTripCostModel)
     portfolio_limits: RISK.PortfolioRiskLimits = field(default_factory=RISK.PortfolioRiskLimits)
@@ -346,6 +356,8 @@ def run_backtest(
                     take_profit_pct=config.take_profit_pct,
                     max_hold_bars=config.max_hold_bars,
                     cost_pct=config.cost_model.cost_pct if hasattr(config.cost_model, "cost_pct") else 0.0,
+                    early_trail_atr_mult=config.early_trail_atr_mult,
+                    early_stage_r_threshold=config.early_stage_r_threshold,
                 )
                 precomputed_exits[(symbol, i)] = exit_result
                 candidate_events.append((i, symbol))
@@ -452,12 +464,26 @@ def run_backtest(
                 planned_risk_dollars=sizing.planned_risk_dollars,
                 market_value=sizing.market_value,
                 period=period,
+                mfe_frac=exit_result.mfe_frac,
+                mae_frac=exit_result.mae_frac,
             )
         )
         if exit_result.exit_bar_index is None:
             # NO_DATA_AFTER_ENTRY -- never actually resolved; remove from ledger immediately, no P&L.
+            # FIX (2026-10-04, Martin-approved): open_until[symbol] is only ever set a few lines
+            # above, guarded by `if exit_result.exit_bar_index is not None` -- so on THIS branch
+            # (exit_bar_index is None) the key was never set, and the original unconditional
+            # `del open_until[symbol]` raised KeyError whenever a trade opened too close to the
+            # end of the available data to ever resolve an exit. This path was previously dead
+            # in practice: the frozen real signal source (.054_signal_source's
+            # AuraFrozenDecisionEngineSignalSource, technical_weight=0.0/short_technical_weight=0.0)
+            # never actually trades, so no real run had ever opened a position this near the end
+            # of a dataset. First reproduced 2026-10-03 running a real-data sector-rotation-weight
+            # sweep with the live technical_weight=1.0/short_technical_weight=1.0 config (TSLA,
+            # KeyError: 'TSLA'). .pop(symbol, None) is a no-op when the key was never set, and
+            # behaves identically to the original `del` in every case where the key *was* set.
             ledger.close_position(symbol)
-            del open_until[symbol]
+            open_until.pop(symbol, None)
 
     research_trades = [t for t in trades if t.period == "RESEARCH"]
     holdout_trades = [t for t in trades if t.period == "HOLDOUT"]
@@ -482,6 +508,37 @@ def run_backtest(
             "CAGR intentionally left None -- requires a real calendar span, not meaningful for a synthetic/pipeline-validation run.",
         ),
     )
+
+
+def trade_records_to_dataframe(trades: list[TradeRecord]) -> pd.DataFrame:
+    """Serializes a `BacktestReport.trades` list to a flat `pd.DataFrame`,
+    one row per trade, suitable for writing to CSV and feeding to
+    `aura_v054_trade_diagnostics.py` (added 2026-10-04, Martin-approved,
+    alongside `TradeRecord.mfe_frac`/`mae_frac`). Pure serialization --
+    no new computation, no filtering, one row per entry exactly as
+    `trades` already contains."""
+    rows = []
+    for t in trades:
+        rows.append({
+            "symbol": t.symbol,
+            "entry_bar_index": t.entry_bar_index,
+            "entry_timestamp": t.entry_timestamp,
+            "entry_price": t.entry_price,
+            "quantity": t.quantity,
+            "exit_bar_index": t.exit_bar_index,
+            "exit_timestamp": t.exit_timestamp,
+            "exit_reason": t.exit_reason,
+            "bars_held": (t.exit_bar_index - t.entry_bar_index) if t.exit_bar_index is not None else None,
+            "gross_return_frac": t.gross_return_frac,
+            "net_return_frac": t.net_return_frac,
+            "realized_pnl_dollars": t.realized_pnl_dollars,
+            "planned_risk_dollars": t.planned_risk_dollars,
+            "market_value": t.market_value,
+            "period": t.period,
+            "mfe_frac": t.mfe_frac,
+            "mae_frac": t.mae_frac,
+        })
+    return pd.DataFrame(rows)
 
 
 def run_baseline(

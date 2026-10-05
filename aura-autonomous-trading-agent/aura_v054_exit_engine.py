@@ -75,6 +75,31 @@ TRAIL_ATR_MULT = 2.0
 TAKE_PROFIT_PCT: float | None = None
 MAX_HOLD_BARS = 20
 
+# CANDIDATE_CHANGE -- proposed 2026-10-04, Martin-approved 2026-10-04.
+# A MAE/MFE giveback diagnostic (2026-10-04, real production-equivalent
+# data) found the uniform 2.0x trail above gives back ~1R of peak
+# unrealized profit on virtually every STOP-exited trade, regardless of
+# how far the trade ran up (147 of 183 trades netted -45.2R in
+# aggregate). A staged-trail A/B study -- single A/B -> frequency-
+# normalized check -> 3x3 robustness grid -> full 6-year dataset --
+# found that tightening the trail to 0.75x ATR while a trade is below
+# EARLY_STAGE_R_THRESHOLD R of favorable excursion (R defined by
+# TRAIL_ATR_MULT, never by this tighter multiplier), then reverting to
+# the original TRAIL_ATR_MULT trail once that threshold clears, holds
+# up on the full 6-year equity dataset's holdout segment
+# (R/calendar-day: baseline 0.0156 -> staged 0.0737; blended
+# research+holdout 0.0470 -> 0.0626) without visibly clipping the small
+# number of large trend trades that fund the book.
+#
+# Still a single chronological train/holdout split, EQUITIES ONLY --
+# MEXC crypto has not yet been revalidated with this change. Set BOTH
+# of these to None to reproduce the original uniform-TRAIL_ATR_MULT
+# behavior exactly (byte-for-byte; see
+# test_default_params_reproduce_frozen_engine_exactly_across_many_seeds
+# equivalent in test_aura_v054_exit_engine.py).
+EARLY_TRAIL_ATR_MULT: float | None = 0.75
+EARLY_STAGE_R_THRESHOLD: float | None = 1.5
+
 
 class ExitEngineError(Exception):
     pass
@@ -136,6 +161,8 @@ def simulate_atr_trailing_trade(
     take_profit_pct: float | None = TAKE_PROFIT_PCT,
     max_hold_bars: int = MAX_HOLD_BARS,
     cost_pct: float,
+    early_trail_atr_mult: float | None = EARLY_TRAIL_ATR_MULT,
+    early_stage_r_threshold: float | None = EARLY_STAGE_R_THRESHOLD,
 ) -> ATRTrailingExitResult:
     """Walk forward bar-by-bar from `entry_idx + 1`, maintaining a
     per-bar ATR-based trailing stop that never moves against the
@@ -143,6 +170,19 @@ def simulate_atr_trailing_trade(
     length and positionally aligned (index i is bar i for all four).
     `atr_values[entry_idx]` must be a valid (non-NaN, positive) ATR --
     this is what seeds the initial stop distance.
+
+    `early_trail_atr_mult` / `early_stage_r_threshold` (CANDIDATE_CHANGE,
+    see module-level comment): while the trade's running favorable
+    excursion is below `early_stage_r_threshold` R -- R defined by
+    `trail_atr_mult`, NEVER by `early_trail_atr_mult`, so position
+    sizing and R-reporting stay anchored to the same risk unit as every
+    other trade in this codebase -- the trail uses
+    `early_trail_atr_mult` instead of `trail_atr_mult`. Once the
+    threshold is cleared, it reverts to `trail_atr_mult` for the rest
+    of the trade's life, including if price later pulls back below the
+    threshold again (never re-tightens once it's earned the wider
+    trail). Pass both as None to get the original uniform-trail
+    behavior byte-for-byte; both must be set, or both left None.
 
     Returns fractional returns (see module docstring's unit convention).
     """
@@ -160,9 +200,18 @@ def simulate_atr_trailing_trade(
         raise ExitEngineError("INVALID_COST_PCT:must be >= 0")
     if entry_idx < 0 or entry_idx >= n:
         raise ExitEngineError("INVALID_ENTRY_IDX")
+    if (early_trail_atr_mult is None) != (early_stage_r_threshold is None):
+        raise ExitEngineError(
+            "early_trail_atr_mult and early_stage_r_threshold must both be set, or both left None"
+        )
 
     atr_at_entry = atr_values[entry_idx]
     initial_distance = initial_stop_distance_long(entry_price, atr_at_entry, trail_atr_mult=trail_atr_mult)
+    # R unit for the staging math -- ALWAYS the mature (trail_atr_mult)
+    # distance, never the tightened early-stage one, so staging can't
+    # silently redefine how big this trade's risk was for sizing/
+    # R-reporting purposes.
+    r_unit_distance = initial_distance
 
     start = entry_idx + 1
     end = min(n, start + max_hold_bars)
@@ -192,6 +241,11 @@ def simulate_atr_trailing_trade(
     exit_bar_index: int | None = None
     bars_held = 0
     stop_trace: list[float] = []
+    # Once True, the early (tighter) multiplier is retired for the rest
+    # of the trade's life -- never demoted back even if price pulls
+    # back below the threshold again, which would otherwise whipsaw a
+    # trade between two stop regimes on ordinary chop near the line.
+    staged_promoted = early_stage_r_threshold is None
 
     for i in range(start, end):
         bars_held += 1
@@ -214,9 +268,16 @@ def simulate_atr_trailing_trade(
         # No exit this bar: NOW update the running extreme and recompute
         # the trail from THIS bar's own ATR -- never letting it decrease.
         running_extreme = max(running_extreme, bar_high)
+
+        if not staged_promoted:
+            current_mfe_r = (running_extreme - entry_price) / r_unit_distance
+            if current_mfe_r >= early_stage_r_threshold:
+                staged_promoted = True
+        active_trail_mult = trail_atr_mult if staged_promoted else early_trail_atr_mult
+
         atr_i = atr_values[i]
         if atr_i is not None and not (isinstance(atr_i, float) and math.isnan(atr_i)) and atr_i > 0:
-            candidate_stop = running_extreme - atr_i * trail_atr_mult
+            candidate_stop = running_extreme - atr_i * active_trail_mult
             prev_stop = max(prev_stop, candidate_stop)
         # If ATR is unavailable/invalid for this bar, the trail simply
         # does not update this bar (stays at prev_stop) -- it never
