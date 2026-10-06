@@ -873,7 +873,27 @@ def test_alpaca_order_spec_digest_mismatch_blocks_submission(tmp_path, monkeypat
     asset = make_alpaca_asset(symbol="AAPL")
     client = FakeAlpacaClient()
 
-    real_authorized_order_request = ALPACA_AUTH.authorized_order_request
+    # `.338.supervise_alpaca_equity_execution` resolves `.336` lazily, at
+    # call time, via `_load_module()` -> `__import__(module_name)`, which
+    # just returns whatever is CURRENTLY in `sys.modules` for that name.
+    # Several other test files in this suite (`.353`/`.355`/`.356`) load
+    # `.336` themselves via a different helper that forcibly overwrites
+    # `sys.modules["aura_v05336_alpaca_equity_execution_authorization"]`
+    # with a freshly-executed module object. Because pytest collects
+    # (imports) every test file before running any test function, this
+    # file's own top-of-file `import ... as ALPACA_AUTH` -- bound once, at
+    # THIS file's own collection time -- can end up orphaned relative to
+    # whatever `sys.modules` holds once the whole suite has finished
+    # collecting: a different object than the one `.338` will actually
+    # resolve at call time. Re-fetching here, at test-RUN time (after all
+    # collection is done, so `sys.modules` is stable for the rest of the
+    # session), guarantees the monkeypatch below lands on the exact
+    # `.336` object `.338` will use -- regardless of collection order.
+    live_alpaca_auth = sys.modules.get(
+        "aura_v05336_alpaca_equity_execution_authorization", ALPACA_AUTH
+    )
+
+    real_authorized_order_request = live_alpaca_auth.authorized_order_request
     real_claim = SUP.claim_alpaca_client_order_id
     holder: dict = {}
 
@@ -892,7 +912,7 @@ def test_alpaca_order_spec_digest_mismatch_blocks_submission(tmp_path, monkeypat
             holder["order_spec"]["__tampered__"] = True
         return granted
 
-    monkeypatch.setattr(ALPACA_AUTH, "authorized_order_request", wrapped_authorized_order_request)
+    monkeypatch.setattr(live_alpaca_auth, "authorized_order_request", wrapped_authorized_order_request)
     monkeypatch.setattr(SUP, "claim_alpaca_client_order_id", tampering_claim)
 
     r = SUP.supervise_alpaca_equity_execution(spec, asset, auth_config=alpaca_auth_config(),
