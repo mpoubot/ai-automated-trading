@@ -480,11 +480,13 @@ def test_compute_max_drawdown_no_history_uses_current_as_peak():
     assert result["drawdown_pct"] == 0.0
 
 
-def _pos(venue="MEXC", symbol="BTC_USDT", direction="LONG", notional=1000.0, leverage=None):
+def _pos(venue="MEXC", symbol="BTC_USDT", direction="LONG", notional=1000.0, leverage=None,
+         quantity=1.0, entry_price=100.0, option_detail=None, structure_group_id=None):
     return MOD.PositionRecord(
-        venue=venue, symbol=symbol, direction=direction, quantity=1.0, entry_price=100.0,
+        venue=venue, symbol=symbol, direction=direction, quantity=quantity, entry_price=entry_price,
         leverage=leverage, mark_price=100.0, notional_usd=notional, notional_basis="MARK_TO_MARKET",
         unrealized_pnl_usd=0.0, liquidation_price=None, raw_source_id=None, as_of="2026-09-12T00:00:00+00:00",
+        option_detail=option_detail, structure_group_id=structure_group_id,
     )
 
 
@@ -645,3 +647,204 @@ def test_module_never_imports_or_calls_execution_or_promotion_modules():
     ]
     for token in forbidden_substrings:
         assert token not in code_only, f"observability module must not reference {token!r}"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-07 Options Track O8 extension: PositionRecord.option_detail/
+# structure_group_id, compute_net_portfolio_delta,
+# compute_defined_risk_structure_max_loss. See module docstring addendum.
+# ---------------------------------------------------------------------------
+
+def _opt_leg(symbol, direction, strike, delta, qty=1.0, entry_price=1.0, right="CALL",
+             expiry="2026-11-20", group=None, multiplier=None, venue="ALPACA"):
+    detail = {"strike": strike, "expiry": expiry, "right": right, "delta": delta}
+    if multiplier is not None:
+        detail["multiplier"] = multiplier
+    return _pos(venue=venue, symbol=symbol, direction=direction, notional=entry_price * qty * 100,
+                quantity=qty, entry_price=entry_price, option_detail=detail, structure_group_id=group)
+
+
+def test_position_record_new_fields_default_to_none():
+    p = _pos()
+    assert p.option_detail is None
+    assert p.structure_group_id is None
+
+
+def test_position_record_to_dict_includes_new_fields():
+    p = _opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.4, group="g1")
+    d = p.to_dict()
+    assert d["option_detail"]["strike"] == 450.0
+    assert d["structure_group_id"] == "g1"
+
+
+# -- compute_net_portfolio_delta --
+
+def test_net_portfolio_delta_flat_book_is_computable_zero():
+    result = MOD.compute_net_portfolio_delta([_pos(notional=1000.0)])  # no option_detail at all
+    assert result == {"status": "COMPUTABLE", "net_delta": 0.0, "legs_included": 0}
+
+
+def test_net_portfolio_delta_single_long_leg():
+    legs = [_opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.35, qty=3)]
+    result = MOD.compute_net_portfolio_delta(legs)
+    assert result["status"] == "COMPUTABLE"
+    assert result["net_delta"] == 0.35 * 3 * 100
+    assert result["legs_included"] == 1
+
+
+def test_net_portfolio_delta_short_leg_sign_flipped():
+    legs = [_opt_leg("SPY261106C00450000", "SHORT", strike=450.0, delta=0.35, qty=1)]
+    result = MOD.compute_net_portfolio_delta(legs)
+    assert result["net_delta"] == -0.35 * 100
+
+
+def test_net_portfolio_delta_sums_across_legs_and_ignores_non_option_positions():
+    legs = [
+        _opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40, qty=1),
+        _opt_leg("SPY261106C00455000", "SHORT", strike=455.0, delta=0.15, qty=1),
+        _pos(venue="MEXC", symbol="BTC_USDT", notional=5000.0),  # no option_detail -- excluded
+    ]
+    result = MOD.compute_net_portfolio_delta(legs)
+    assert result["net_delta"] == (0.40 - 0.15) * 100
+    assert result["legs_included"] == 2
+
+
+def test_net_portfolio_delta_missing_delta_reports_not_computable_naming_leg():
+    bad = _pos(venue="ALPACA", symbol="SPY261106C00450000", option_detail={"strike": 450.0, "expiry": "2026-11-20", "right": "CALL"})
+    result = MOD.compute_net_portfolio_delta([bad])
+    assert result["status"] == "NOT_COMPUTABLE"
+    assert result["reason"] == "MISSING_OR_INVALID_DELTA"
+    assert "ALPACA:SPY261106C00450000" in result["unpriced_legs"]
+
+
+def test_net_portfolio_delta_non_numeric_delta_reports_not_computable():
+    bad = _pos(venue="ALPACA", symbol="X", option_detail={"strike": 450.0, "expiry": "e", "right": "CALL", "delta": "oops"})
+    result = MOD.compute_net_portfolio_delta([bad])
+    assert result["status"] == "NOT_COMPUTABLE"
+
+
+def test_net_portfolio_delta_custom_multiplier_override():
+    legs = [_opt_leg("X", "LONG", strike=10.0, delta=0.5, qty=1, multiplier=10)]
+    result = MOD.compute_net_portfolio_delta(legs)
+    assert result["net_delta"] == 0.5 * 1 * 10
+
+
+# -- compute_defined_risk_structure_max_loss / _max_loss_for_group --
+
+def test_max_loss_empty_positions_returns_empty_dict():
+    assert MOD.compute_defined_risk_structure_max_loss([]) == {}
+
+
+def test_max_loss_legs_without_group_id_are_not_reported():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4), _opt_leg("B", "LONG", strike=455.0, delta=0.15)]
+    assert MOD.compute_defined_risk_structure_max_loss(legs) == {}
+
+
+def test_max_loss_valid_credit_vertical_computes_correctly():
+    short_leg = _opt_leg("A", "SHORT", strike=450.0, delta=-0.40, entry_price=2.00, group="g1")
+    long_leg = _opt_leg("B", "LONG", strike=455.0, delta=0.15, entry_price=0.50, group="g1")
+    report = MOD.compute_defined_risk_structure_max_loss([short_leg, long_leg])
+    assert set(report.keys()) == {"g1"}
+    g = report["g1"]
+    assert g["status"] == "COMPUTABLE"
+    assert g["strike_width"] == 5.0
+    assert g["net_credit_received"] == 150.0  # (2.00-0.50)*100*1
+    assert g["max_loss"] == 350.0             # 5*100*1 - 150
+
+
+def test_max_loss_wrong_leg_count_not_computable():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "GROUP_DOES_NOT_HAVE_EXACTLY_TWO_LEGS"
+
+
+def test_max_loss_two_legs_same_direction_not_computable():
+    legs = [_opt_leg("A", "LONG", strike=450.0, delta=0.4, group="g1"), _opt_leg("B", "LONG", strike=455.0, delta=0.15, group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "GROUP_NOT_ONE_LONG_ONE_SHORT"
+
+
+def test_max_loss_mixed_rights_not_computable():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, right="CALL", group="g1"),
+            _opt_leg("B", "LONG", strike=455.0, delta=0.15, right="PUT", group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "GROUP_MIXED_OR_INVALID_RIGHTS"
+
+
+def test_max_loss_mixed_expiries_not_computable():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, expiry="2026-11-20", group="g1"),
+            _opt_leg("B", "LONG", strike=455.0, delta=0.15, expiry="2026-12-18", group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "GROUP_MIXED_OR_MISSING_EXPIRIES"
+
+
+def test_max_loss_qty_mismatch_not_computable():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, qty=1, group="g1"),
+            _opt_leg("B", "LONG", strike=455.0, delta=0.15, qty=2, group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "GROUP_LEG_QTY_MISMATCH"
+
+
+def test_max_loss_invalid_strike_not_computable():
+    bad = _pos(venue="ALPACA", symbol="A", direction="SHORT",
+               option_detail={"strike": "oops", "expiry": "2026-11-20", "right": "CALL", "delta": -0.4}, structure_group_id="g1")
+    good = _opt_leg("B", "LONG", strike=455.0, delta=0.15, group="g1")
+    g = MOD.compute_defined_risk_structure_max_loss([bad, good])["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "INVALID_STRIKE"
+
+
+def test_max_loss_zero_strike_width_not_computable():
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, group="g1"), _opt_leg("B", "LONG", strike=450.0, delta=0.15, group="g1")]
+    g = MOD.compute_defined_risk_structure_max_loss(legs)["g1"]
+    assert g["status"] == "NOT_COMPUTABLE" and g["reason"] == "ZERO_STRIKE_WIDTH"
+
+
+def test_max_loss_multiple_groups_computed_independently():
+    g1 = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, entry_price=2.00, group="g1"),
+          _opt_leg("B", "LONG", strike=455.0, delta=0.15, entry_price=0.50, group="g1")]
+    g2 = [_opt_leg("C", "SHORT", strike=100.0, delta=-0.3, entry_price=1.00, group="g2"),
+          _opt_leg("D", "LONG", strike=105.0, delta=0.10, entry_price=0.20, group="g2")]
+    report = MOD.compute_defined_risk_structure_max_loss(g1 + g2)
+    assert set(report.keys()) == {"g1", "g2"}
+    assert report["g1"]["status"] == "COMPUTABLE" and report["g2"]["status"] == "COMPUTABLE"
+    assert report["g1"]["max_loss"] != report["g2"]["max_loss"]
+
+
+# -- wiring into compute_exposure_dimensions / project_post_trade_exposure --
+
+def test_compute_exposure_dimensions_includes_o8_dimensions():
+    snap = _snapshot_for_dimensions()
+    report = MOD.compute_exposure_dimensions(snap, [], mexc_leverage_cap=10.0)
+    assert report["net_portfolio_delta"]["status"] == "COMPUTABLE"
+    assert report["defined_risk_structure_max_loss"] == {}
+
+
+def test_project_post_trade_exposure_accepts_single_hypothetical_backward_compatible():
+    snap = _snapshot_for_dimensions()
+    hypothetical = _pos(venue="MEXC", symbol="SOL_USDT", notional=500.0)
+    result = MOD.project_post_trade_exposure(snap, [], hypothetical)
+    assert result["status"] == "COMPUTABLE"
+    assert "net_portfolio_delta" in result["before"] and "net_portfolio_delta" in result["after"]
+    assert "defined_risk_structure_max_loss" in result["before"]
+
+
+def test_project_post_trade_exposure_accepts_list_of_two_legs_and_pairs_them():
+    snap = _snapshot_for_dimensions()
+    short_leg = _opt_leg("A", "SHORT", strike=450.0, delta=-0.40, entry_price=2.00, group="new")
+    long_leg = _opt_leg("B", "LONG", strike=455.0, delta=0.15, entry_price=0.50, group="new")
+    result = MOD.project_post_trade_exposure(snap, [], [short_leg, long_leg])
+    assert result["before"]["defined_risk_structure_max_loss"] == {}
+    after_group = result["after"]["defined_risk_structure_max_loss"]["new"]
+    assert after_group["status"] == "COMPUTABLE"
+    assert after_group["max_loss"] == 350.0
+    assert result["before"]["net_portfolio_delta"]["net_delta"] != result["after"]["net_portfolio_delta"]["net_delta"]
+    # original snapshot unmutated
+    assert len(snap.positions) == 2
+
+
+def test_project_post_trade_exposure_list_does_not_mutate_original_snapshot():
+    snap = _snapshot_for_dimensions()
+    original_len = len(snap.positions)
+    legs = [_opt_leg("A", "SHORT", strike=450.0, delta=-0.4, group="new"), _opt_leg("B", "LONG", strike=455.0, delta=0.15, group="new")]
+    MOD.project_post_trade_exposure(snap, [], legs)
+    assert len(snap.positions) == original_len
