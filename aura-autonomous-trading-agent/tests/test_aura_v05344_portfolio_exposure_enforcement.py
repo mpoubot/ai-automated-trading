@@ -46,11 +46,29 @@ def _status(venue, status="SUCCESS", equity=10000.0, positions_count=0, error=No
 
 
 def _pos(venue="MEXC", symbol="BTC_USDT", direction="LONG", notional=1000.0, leverage=None,
-         raw_source_id=None, as_of=AS_OF):
+         raw_source_id=None, as_of=AS_OF, quantity=1.0, entry_price=100.0,
+         option_detail=None, structure_group_id=None):
     return OBS.PositionRecord(
-        venue=venue, symbol=symbol, direction=direction, quantity=1.0, entry_price=100.0,
+        venue=venue, symbol=symbol, direction=direction, quantity=quantity, entry_price=entry_price,
         leverage=leverage, mark_price=100.0, notional_usd=notional, notional_basis="MARK_TO_MARKET",
         unrealized_pnl_usd=0.0, liquidation_price=None, raw_source_id=raw_source_id, as_of=as_of,
+        option_detail=option_detail, structure_group_id=structure_group_id,
+    )
+
+
+def _opt_leg(symbol, direction, strike, delta, qty=1.0, entry_price=1.0, right="CALL",
+             expiry="2026-11-20", group=None, venue="ALPACA"):
+    """2026-10-07 Options Track O8 extension test helper -- one option
+    leg, with option_detail and (optionally) structure_group_id set. Also
+    given a plausible notional_usd (entry_price * qty * 100) so it
+    doesn't trip the OTHER, pre-existing notional-based dimensions'
+    positions_excluded_no_notional BLOCK in tests that aren't specifically
+    about that interaction (see test_option_leg_without_notional_* below
+    for that interaction's own coverage)."""
+    return _pos(
+        venue=venue, symbol=symbol, direction=direction, notional=entry_price * qty * 100, quantity=qty, entry_price=entry_price,
+        option_detail={"strike": strike, "expiry": expiry, "right": right, "delta": delta},
+        structure_group_id=group,
     )
 
 
@@ -105,6 +123,11 @@ def test_clean_portfolio_within_all_configured_limits_allows():
         max_leverage_ratio_by_venue={"MEXC": 1.0, "ALPACA": 1.0}, mexc_leverage_cap=10.0,
         max_daily_loss_pct_by_venue={"MEXC": 0.1, "ALPACA": 0.1}, max_drawdown_pct_by_venue={"MEXC": 0.3, "ALPACA": 0.3},
         correlated_groups={"majors": ("MEXC:BTC_USDT",)}, max_correlation_group_concentration_ratio=0.9,
+        # 2026-10-07 Options Track O8 extension: configured too, so this
+        # "everything configured, clean portfolio" test stays exhaustive --
+        # same reason correlated_groups/max_correlation_group_concentration_
+        # ratio above are explicitly set rather than left None.
+        max_portfolio_delta=1000.0, max_loss_per_position_usd=10000.0,
     )
     decision = _evaluate(snap, limits)
     assert decision.overall_verdict == "ALLOW"
@@ -618,3 +641,242 @@ def test_pre_existing_behavior_unaffected_when_no_correlated_groups_configured()
     non_group_verdicts = [v for v in decision.dimension_verdicts if v.dimension != "correlation_group_concentration"]
     asset_conc = next(v for v in non_group_verdicts if v.dimension == "asset_concentration")
     assert asset_conc.verdict == "BLOCK" and asset_conc.reason == "LIMIT_BREACHED"
+
+
+# ---------------------------------------------------------------------------
+# Section 3 — 2026-10-07 Options Track O8 extension: net_portfolio_delta
+# and defined_risk_structure_max_loss. See .44's module docstring
+# addendum for full rationale.
+# ---------------------------------------------------------------------------
+
+def _max_loss_verdicts(decision, group=None):
+    verdicts = [v for v in decision.dimension_verdicts if v.dimension == "defined_risk_structure_max_loss"]
+    if group is None:
+        return verdicts
+    return [v for v in verdicts if v.evidence.get("group") == group]
+
+
+def _delta_verdict(decision):
+    return next(v for v in decision.dimension_verdicts if v.dimension == "net_portfolio_delta")
+
+
+# -- net_portfolio_delta --
+
+def test_portfolio_delta_no_option_legs_no_limit_reports_limit_not_configured():
+    snap = _snapshot([_pos(venue="MEXC", symbol="BTC_USDT", notional=1000.0)], mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits())
+    v = _delta_verdict(decision)
+    assert v.verdict == "LIMIT_NOT_CONFIGURED" and v.evidence["net_delta"] == 0.0
+
+
+def test_portfolio_delta_flat_option_book_with_limit_configured_passes():
+    snap = _snapshot([_pos(venue="MEXC", symbol="BTC_USDT", notional=1000.0)], mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=50.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "PASS" and v.reason == "WITHIN_LIMIT"
+
+
+def test_portfolio_delta_within_limit_passes():
+    legs = [_opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40, qty=2)]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=100.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "PASS"
+    assert v.evidence["net_delta"] == 0.40 * 2 * 100  # delta * qty * multiplier
+
+
+def test_portfolio_delta_breach_blocks():
+    legs = [_opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40, qty=2)]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=50.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
+    assert decision.overall_verdict == "BLOCK"
+
+
+def test_portfolio_delta_short_leg_flips_sign_and_can_net_to_zero():
+    legs = [
+        _opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40, qty=1),
+        _opt_leg("SPY261106C00455000", "SHORT", strike=455.0, delta=0.40, qty=1),
+    ]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=2))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "PASS"
+    assert v.evidence["net_delta"] == 0.0  # 0.40*100 - 0.40*100
+
+
+def test_portfolio_delta_missing_delta_on_one_leg_blocks():
+    leg = _opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40)
+    bad_leg = OBS.PositionRecord(
+        venue="ALPACA", symbol="SPY261106C00455000", direction="SHORT", quantity=1.0, entry_price=1.0,
+        leverage=None, mark_price=1.0, notional_usd=100.0, notional_basis="MARK_TO_MARKET",
+        unrealized_pnl_usd=0.0, liquidation_price=None, raw_source_id=None, as_of=AS_OF,
+        option_detail={"strike": 455.0, "expiry": "2026-11-20", "right": "CALL"},  # delta missing
+    )
+    snap = _snapshot([leg, bad_leg], alpaca_status=_status("ALPACA", equity=10000.0, positions_count=2))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1000.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "BLOCK" and v.reason == "EXPOSURE_NOT_COMPUTABLE"
+    assert "ALPACA:SPY261106C00455000" in v.evidence["unpriced_legs"]
+
+
+def test_portfolio_delta_blocks_on_failed_configured_venue():
+    legs = [_opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40)]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", status="FAILED", error="timeout"))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1000.0))
+    v = _delta_verdict(decision)
+    assert v.verdict == "BLOCK" and v.reason == "VENUE_DATA_INCOMPLETE"
+
+
+# -- defined_risk_structure_max_loss --
+
+def test_max_loss_no_open_structures_no_limit_reports_limit_not_configured():
+    snap = _snapshot([_pos(venue="MEXC", symbol="BTC_USDT", notional=1000.0)], mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits())
+    verdicts = _max_loss_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "LIMIT_NOT_CONFIGURED" and verdicts[0].reason == "NO_LIMIT_CONFIGURED"
+
+
+def test_max_loss_no_open_structures_with_limit_configured_passes():
+    snap = _snapshot([_pos(venue="MEXC", symbol="BTC_USDT", notional=1000.0)], mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_loss_per_position_usd=500.0))
+    verdicts = _max_loss_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "PASS" and verdicts[0].reason == "NO_OPEN_STRUCTURES"
+
+
+def _credit_vertical(group="spread1", short_entry=2.00, long_entry=0.50, short_strike=450.0, long_strike=455.0, qty=1.0):
+    short_leg = _opt_leg("SPY261106C00450000", "SHORT", strike=short_strike, delta=-0.40, entry_price=short_entry, qty=qty, group=group)
+    long_leg = _opt_leg("SPY261106C00455000", "LONG", strike=long_strike, delta=0.15, entry_price=long_entry, qty=qty, group=group)
+    return [short_leg, long_leg]
+
+
+def test_max_loss_valid_vertical_within_limit_passes():
+    legs = _credit_vertical()
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=2))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_loss_per_position_usd=1000.0))
+    v = _max_loss_verdicts(decision, "spread1")[0]
+    # strike_width=5, multiplier=100, qty=1 -> gross=500; credit=(2.00-0.50)*100=150; max_loss=350
+    assert v.verdict == "PASS"
+    assert v.evidence["max_loss"] == 350.0
+
+
+def test_max_loss_valid_vertical_breach_blocks():
+    legs = _credit_vertical()
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=2))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_loss_per_position_usd=100.0))
+    v = _max_loss_verdicts(decision, "spread1")[0]
+    assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
+    assert decision.overall_verdict == "BLOCK"
+
+
+def test_max_loss_malformed_group_blocks_regardless_of_limit():
+    """Three legs sharing one group id is not a valid 2-leg vertical --
+    cannot be proven safe, BLOCKs even with no limit configured (same
+    fail-closed treatment every other EXPOSURE_NOT_COMPUTABLE case gets)."""
+    legs = [
+        _opt_leg("A", "SHORT", strike=450.0, delta=-0.4, group="bad"),
+        _opt_leg("B", "LONG", strike=455.0, delta=0.15, group="bad"),
+        _opt_leg("C", "LONG", strike=460.0, delta=0.05, group="bad"),
+    ]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=3))
+    decision = _evaluate(snap, ENF.PortfolioLimits())
+    v = _max_loss_verdicts(decision, "bad")[0]
+    assert v.verdict == "BLOCK" and v.reason == "EXPOSURE_NOT_COMPUTABLE"
+
+
+def test_max_loss_blocks_on_failed_configured_venue():
+    legs = _credit_vertical()
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", status="FAILED", error="timeout"))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_loss_per_position_usd=1000.0))
+    verdicts = _max_loss_verdicts(decision)
+    assert len(verdicts) == 1
+    assert verdicts[0].verdict == "BLOCK" and verdicts[0].reason == "VENUE_DATA_INCOMPLETE"
+
+
+def test_max_loss_multiple_groups_each_get_own_verdict():
+    group1 = _credit_vertical(group="g1")
+    group2 = _credit_vertical(group="g2", short_entry=1.00, long_entry=0.80)  # thinner credit -> larger max loss
+    group2[0] = OBS.PositionRecord(**{**group2[0].to_dict(), "symbol": "C", "structure_group_id": "g2",
+                                       "option_detail": {**group2[0].option_detail}})
+    group2[1] = OBS.PositionRecord(**{**group2[1].to_dict(), "symbol": "D", "structure_group_id": "g2",
+                                       "option_detail": {**group2[1].option_detail}})
+    snap = _snapshot(group1 + group2, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=4))
+    decision = _evaluate(snap, ENF.PortfolioLimits(max_loss_per_position_usd=400.0))
+    v1 = _max_loss_verdicts(decision, "g1")[0]
+    v2 = _max_loss_verdicts(decision, "g2")[0]
+    assert v1.verdict == "PASS"   # max_loss 350
+    assert v2.verdict == "BLOCK"  # max_loss = 5*100 - (1.00-0.80)*100 = 500-20 = 480 > 400
+
+
+# -- evaluate_hypothetical_trade: multi-leg (list) hypothetical --
+
+def test_hypothetical_trade_accepts_list_of_two_legs_for_one_vertical():
+    """2026-10-07 O8 extension: hypothetical may be a list -- both legs of
+    a new vertical, sharing one structure_group_id, evaluated together so
+    defined_risk_structure_max_loss can see the pairing."""
+    snap = _snapshot([], alpaca_status=_status("ALPACA", equity=10000.0, positions_count=0))
+    hypothetical = _credit_vertical(group="new_spread")
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical,
+                                                 ENF.PortfolioLimits(max_loss_per_position_usd=1000.0),
+                                                 max_snapshot_age_seconds=300, now=NOW)
+    v = _max_loss_verdicts(decision, "new_spread")[0]
+    assert v.verdict == "PASS" and v.evidence["max_loss"] == 350.0
+    assert decision.overall_verdict == "ALLOW"
+
+
+def test_hypothetical_trade_list_hypothetical_breaching_max_loss_blocks():
+    snap = _snapshot([], alpaca_status=_status("ALPACA", equity=10000.0, positions_count=0))
+    hypothetical = _credit_vertical(group="new_spread")
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical,
+                                                 ENF.PortfolioLimits(max_loss_per_position_usd=100.0),
+                                                 max_snapshot_age_seconds=300, now=NOW)
+    assert decision.overall_verdict == "BLOCK"
+
+
+def test_hypothetical_trade_single_record_backward_compatible_with_new_dimensions_present():
+    """Pre-existing single-PositionRecord callers are unaffected -- the
+    new dimensions still appear (LIMIT_NOT_CONFIGURED/flat-equivalent),
+    never an error, never a changed verdict on any OTHER dimension."""
+    snap = _snapshot([_pos(venue="MEXC", symbol="BTC_USDT", notional=1000.0)], mexc_status=_status("MEXC", equity=10000.0, positions_count=1))
+    hypothetical = _pos(venue="MEXC", symbol="ETH_USDT", notional=500.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, ENF.PortfolioLimits(),
+                                                 max_snapshot_age_seconds=300, now=NOW)
+    assert _delta_verdict(decision).verdict == "LIMIT_NOT_CONFIGURED"
+    assert _max_loss_verdicts(decision)[0].verdict == "LIMIT_NOT_CONFIGURED"
+
+
+def test_hypothetical_trade_mexc_cap_check_still_works_with_list_hypothetical():
+    """any(h.venue == "MEXC" ...) generalization of the pre-existing
+    single-object hypothetical.venue == "MEXC" check -- must not regress
+    when hypothetical is a list whose legs are all non-MEXC (options)."""
+    snap = _snapshot([], alpaca_status=_status("ALPACA", equity=10000.0, positions_count=0),
+                      mexc_status=_status("MEXC", status="FAILED", error="down"))
+    hypothetical = _credit_vertical(group="new_spread")  # both legs venue=ALPACA
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, ENF.PortfolioLimits(mexc_leverage_cap=5.0),
+                                                 max_snapshot_age_seconds=300, now=NOW)
+    cap_verdict = next(v for v in decision.dimension_verdicts if v.dimension == "mexc_leverage_cap")
+    # MEXC failed, but the hypothetical never touches MEXC -> this must NOT
+    # be force-blocked by MEXC's own venue-data-quality failure the way a
+    # MEXC-venue hypothetical would be; it falls through to the projected
+    # cap check instead (no MEXC positions at all -> cap check itself has
+    # nothing to report on, still deterministic either way).
+    assert cap_verdict.dimension == "mexc_leverage_cap"
+
+
+def test_portfolio_limits_to_dict_includes_o8_fields():
+    limits = ENF.PortfolioLimits(max_portfolio_delta=250.0, max_loss_per_position_usd=5000.0)
+    d = limits.to_dict()
+    assert d["max_portfolio_delta"] == 250.0
+    assert d["max_loss_per_position_usd"] == 5000.0
+
+
+def test_o8_dimensions_participate_in_decision_hash():
+    legs = [_opt_leg("SPY261106C00450000", "LONG", strike=450.0, delta=0.40, qty=2)]
+    snap = _snapshot(legs, alpaca_status=_status("ALPACA", equity=10000.0, positions_count=1))
+    d1 = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1000.0))
+    d2 = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1.0))
+    assert d1.decision_hash != d2.decision_hash
+    assert d1.overall_verdict == "ALLOW" and d2.overall_verdict == "BLOCK"

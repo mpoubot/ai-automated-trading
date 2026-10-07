@@ -197,6 +197,35 @@ for a broadened, not narrower, hardening pass on this module:
     above); persistence is a separate, explicit wiring step, the same way
     wiring `.44`'s decision into `.31`/`.36`'s authorization chain was
     left to a later step rather than folded into this module's own scope.
+
+Extension — 2026-10-07, Options Track Phase O8 (Greeks-aware portfolio
+risk)
+------------------------------------------------------------------------
+Extends `.43`'s own O8 extension (its two new `net_portfolio_delta` /
+`defined_risk_structure_max_loss` dimensions — see `.43`'s module
+docstring addendum) with two new limit types, same "never invent a
+limit" discipline as every field above: both default to `None` until
+Martin explicitly supplies them.
+  - `max_portfolio_delta`: caps `abs(net_portfolio_delta)` (options
+    positions only, per Martin's confirmed scope — stock/crypto linear
+    delta is not folded in here either). Data-quality gating matches the
+    existing aggregate (cross-venue-sum) dimensions above — a failed
+    configured venue BLOCKs, since an option leg on the failed venue
+    would be silently absent from the sum.
+  - `max_loss_per_position_usd`: caps each individual defined-risk
+    structure's (v1: 2-leg net-credit vertical) `max_loss`, one
+    `DimensionVerdict` per `structure_group_id` found in the snapshot —
+    same per-group verdict-list shape `correlation_group_concentration`
+    above already uses. Zero open structures is trivially safe (PASS if
+    a limit is configured, else LIMIT_NOT_CONFIGURED), same "empty book
+    is safe by construction" treatment every other dimension in this
+    module already gives a flat book.
+  - Both are evaluated in `evaluate_portfolio_enforcement` (against
+    currently-open positions) AND in `evaluate_hypothetical_trade`
+    (against the PROJECTED post-trade state, via `.43`'s own
+    `project_post_trade_exposure()`, which now also returns these two
+    dimensions in its before/after — this module does not re-derive the
+    projection, same discipline as every pre-existing projected check).
 """
 from __future__ import annotations
 
@@ -284,6 +313,10 @@ class PortfolioLimits:
     # LIMIT_NOT_CONFIGURED, never a guess.
     correlated_groups: dict[str, tuple[str, ...]] = field(default_factory=dict)
     max_correlation_group_concentration_ratio: float | None = None
+    # 2026-10-07 Options Track O8 extension (see module docstring
+    # addendum). Both default to None -- never invented.
+    max_portfolio_delta: float | None = None
+    max_loss_per_position_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -296,6 +329,8 @@ class PortfolioLimits:
             "max_drawdown_pct_by_venue": dict(self.max_drawdown_pct_by_venue),
             "correlated_groups": {k: tuple(v) for k, v in self.correlated_groups.items()},
             "max_correlation_group_concentration_ratio": self.max_correlation_group_concentration_ratio,
+            "max_portfolio_delta": self.max_portfolio_delta,
+            "max_loss_per_position_usd": self.max_loss_per_position_usd,
         }
 
 
@@ -490,6 +525,68 @@ def _check_correlation_group_concentration(exposure_report: dict, snapshot, limi
     return out
 
 
+def _check_portfolio_delta(exposure_report: dict, snapshot, limits: PortfolioLimits) -> DimensionVerdict:
+    """2026-10-07 Options Track O8 extension (see module docstring
+    addendum). Same aggregate (cross-venue) data-quality gating as
+    portfolio_heat/asset_concentration/directional_exposure above -- an
+    option leg on a failed venue would be silently absent from the sum."""
+    blocked = _aggregate_data_quality_block(snapshot)
+    if blocked is not None:
+        return DimensionVerdict(dimension="net_portfolio_delta", venue=None, verdict=BLOCK, reason=blocked.reason, evidence=blocked.evidence)
+    report = exposure_report["net_portfolio_delta"]
+    if report["status"] != "COMPUTABLE":
+        return DimensionVerdict(dimension="net_portfolio_delta", venue=None, verdict=BLOCK, reason="EXPOSURE_NOT_COMPUTABLE",
+                                 evidence={"upstream_reason": report.get("reason"), "unpriced_legs": report.get("unpriced_legs")})
+    if limits.max_portfolio_delta is None:
+        return DimensionVerdict(dimension="net_portfolio_delta", venue=None, verdict=LIMIT_NOT_CONFIGURED, reason="NO_LIMIT_CONFIGURED",
+                                 evidence={"net_delta": report["net_delta"]})
+    breached = abs(report["net_delta"]) > limits.max_portfolio_delta
+    return DimensionVerdict(
+        dimension="net_portfolio_delta", venue=None, verdict=BLOCK if breached else PASS,
+        reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
+        evidence={"net_delta": report["net_delta"], "limit": limits.max_portfolio_delta},
+    )
+
+
+def _check_defined_risk_structure_max_loss(exposure_report: dict, snapshot, limits: PortfolioLimits) -> list[DimensionVerdict]:
+    """2026-10-07 Options Track O8 extension (see module docstring
+    addendum). One DimensionVerdict per structure_group_id found in the
+    snapshot (dimension="defined_risk_structure_max_loss", the group id
+    lives in evidence["group"]). Zero open structures is trivially safe
+    (PASS if a limit is configured, else LIMIT_NOT_CONFIGURED) -- same
+    "empty book is safe by construction" treatment every other dimension
+    in this module already gives a flat book."""
+    blocked = _aggregate_data_quality_block(snapshot)
+    if blocked is not None:
+        return [DimensionVerdict(dimension="defined_risk_structure_max_loss", venue=None, verdict=BLOCK,
+                                  reason=blocked.reason, evidence=blocked.evidence)]
+
+    report = exposure_report["defined_risk_structure_max_loss"]
+    if not report:
+        verdict = PASS if limits.max_loss_per_position_usd is not None else LIMIT_NOT_CONFIGURED
+        reason = "NO_OPEN_STRUCTURES" if verdict == PASS else "NO_LIMIT_CONFIGURED"
+        return [DimensionVerdict(dimension="defined_risk_structure_max_loss", venue=None, verdict=verdict, reason=reason, evidence={})]
+
+    out: list[DimensionVerdict] = []
+    for group_id in sorted(report):
+        group_result = report[group_id]
+        if group_result["status"] != "COMPUTABLE":
+            out.append(DimensionVerdict(dimension="defined_risk_structure_max_loss", venue=None, verdict=BLOCK,
+                                         reason="EXPOSURE_NOT_COMPUTABLE",
+                                         evidence={"group": group_id, "upstream_reason": group_result.get("reason")}))
+            continue
+        if limits.max_loss_per_position_usd is None:
+            out.append(DimensionVerdict(dimension="defined_risk_structure_max_loss", venue=None, verdict=LIMIT_NOT_CONFIGURED,
+                                         reason="NO_LIMIT_CONFIGURED",
+                                         evidence={"group": group_id, "max_loss": group_result["max_loss"]}))
+            continue
+        breached = group_result["max_loss"] > limits.max_loss_per_position_usd
+        out.append(DimensionVerdict(dimension="defined_risk_structure_max_loss", venue=None, verdict=BLOCK if breached else PASS,
+                                     reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
+                                     evidence={"group": group_id, "max_loss": group_result["max_loss"], "limit": limits.max_loss_per_position_usd}))
+    return out
+
+
 def _check_directional_exposure(exposure_report: dict, snapshot, limits: PortfolioLimits) -> DimensionVerdict:
     blocked = _aggregate_data_quality_block(snapshot)
     if blocked is not None:
@@ -676,6 +773,8 @@ def evaluate_portfolio_enforcement(
     verdicts.append(_check_mexc_leverage_cap(snapshot, limits))
     verdicts.extend(_check_daily_loss(exposure_report, snapshot, limits))
     verdicts.extend(_check_max_drawdown(exposure_report, snapshot, limits))
+    verdicts.append(_check_portfolio_delta(exposure_report, snapshot, limits))
+    verdicts.extend(_check_defined_risk_structure_max_loss(exposure_report, snapshot, limits))
     verdicts.extend(_not_computable_verdicts())
 
     return _finalize(as_of, snapshot.as_of, snapshot.state_hash, verdicts)
@@ -685,22 +784,27 @@ def evaluate_hypothetical_trade(
     snapshot, equity_history: list[dict[str, Any]], hypothetical: Any, limits: PortfolioLimits, *,
     max_snapshot_age_seconds: float, now: datetime | None = None,
 ) -> EnforcementDecision:
-    """Authorization-time gate: would adding `hypothetical` (a .43
-    PositionRecord that does not yet exist in `snapshot`) breach a
-    configured limit? Reuses .43's OWN `project_post_trade_exposure()` for
-    the projected numbers -- this module does not build a second position-
-    aggregation model. Current-state-only dimensions unaffected by one
-    hypothetical order (daily_loss, max_drawdown) are evaluated against the
-    snapshot as it actually is today; asset_concentration is likewise
-    evaluated against the current state only, since .43's own projection
-    helper does not include it (this module does not extend that helper --
-    see module docstring point 2 on not expanding .43)."""
+    """Authorization-time gate: would adding `hypothetical` (one .43
+    PositionRecord, or -- 2026-10-07 Options Track O8 extension, see
+    module docstring addendum -- a list/tuple of them, e.g. both legs of
+    one vertical spread sharing a structure_group_id) that does not yet
+    exist in `snapshot` breach a configured limit? Reuses .43's OWN
+    `project_post_trade_exposure()` for the projected numbers -- this
+    module does not build a second position-aggregation model.
+    Current-state-only dimensions unaffected by the hypothetical trade
+    (daily_loss, max_drawdown) are evaluated against the snapshot as it
+    actually is today; asset_concentration is likewise evaluated against
+    the current state only, since .43's own projection helper does not
+    include it (this module does not extend that helper -- see module
+    docstring point 2 on not expanding .43)."""
     now = now or datetime.now(timezone.utc)
     as_of = now.isoformat()
 
     fresh_block = _check_snapshot_freshness(snapshot, now, max_snapshot_age_seconds)
     if fresh_block is not None:
         return _finalize(as_of, snapshot.as_of, snapshot.state_hash, [fresh_block])
+
+    hypothetical_list = list(hypothetical) if isinstance(hypothetical, (list, tuple)) else [hypothetical]
 
     current_report = OBS.compute_exposure_dimensions(snapshot, equity_history, mexc_leverage_cap=limits.mexc_leverage_cap)
     projection = OBS.project_post_trade_exposure(snapshot, equity_history, hypothetical, mexc_leverage_cap=limits.mexc_leverage_cap)
@@ -720,11 +824,21 @@ def evaluate_hypothetical_trade(
     pseudo_report_for_leverage = {"leverage_exposure": after["leverage_exposure"]}
     verdicts.extend(_check_leverage_exposure(pseudo_report_for_leverage, snapshot, limits))
 
+    # 2026-10-07 Options Track O8 extension: net_portfolio_delta and
+    # defined_risk_structure_max_loss are projectable the same way (.43's
+    # project_post_trade_exposure() now returns both in before/after) --
+    # evaluated against the PROJECTED state, same group as heat/direction/
+    # leverage above.
+    pseudo_report_for_delta = {"net_portfolio_delta": after["net_portfolio_delta"]}
+    verdicts.append(_check_portfolio_delta(pseudo_report_for_delta, snapshot, limits))
+    pseudo_report_for_max_loss = {"defined_risk_structure_max_loss": after["defined_risk_structure_max_loss"]}
+    verdicts.extend(_check_defined_risk_structure_max_loss(pseudo_report_for_max_loss, snapshot, limits))
+
     # mexc_leverage_cap_check from the projection already reflects the
-    # hypothetical position -- use it directly rather than re-deriving.
+    # hypothetical position(s) -- use it directly rather than re-deriving.
     projected_cap = after["mexc_leverage_cap_check"]
     dq = _venue_data_quality(snapshot, "MEXC")
-    if dq is not None and hypothetical.venue == "MEXC":
+    if dq is not None and any(h.venue == "MEXC" for h in hypothetical_list):
         verdicts.append(DimensionVerdict(dimension="mexc_leverage_cap", venue="MEXC", verdict=dq.verdict, reason=dq.reason, evidence=dq.evidence))
     elif not projected_cap["cap_configured"]:
         verdicts.append(DimensionVerdict(dimension="mexc_leverage_cap", venue="MEXC", verdict=LIMIT_NOT_CONFIGURED, reason="NO_LIMIT_CONFIGURED", evidence={"positions": projected_cap["positions"]}))

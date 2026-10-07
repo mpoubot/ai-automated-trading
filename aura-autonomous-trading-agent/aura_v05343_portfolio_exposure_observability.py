@@ -176,11 +176,68 @@ future scheduled job, or ad hoc). `persist_snapshot()` writes:
   state/portfolio_exposure/equity_history.json -- append-only-by-content
       (atomic read-modify-write) equity-by-venue history, hash-stamped,
       the same file `daily_loss`/`max_drawdown` read from on every run.
+
+Extension -- 2026-10-07, Options Track Phase O8 (Greeks-aware portfolio
+risk)
+------------------------------------------------------------------------
+Per the options-build scoping doc and Martin's explicit AskUserQuestion
+answers (2026-10-07), this module is extended IN PLACE (same version
+number, same convention as the 2026-09-24 correlation-group-concentration
+extension to `.44`) rather than built as a new sibling module:
+
+  - `PositionRecord` gains two new OPTIONAL fields, `option_detail` and
+    `structure_group_id`, both defaulting to `None` so every pre-existing
+    caller (stock/crypto positions, which never set either) gets a
+    byte-identical record. `option_detail` is a caller-supplied dict
+    (`{"strike", "expiry", "right", "delta", "gamma": optional,
+    "vega": optional, "multiplier": optional, defaults to 100}`) -- this
+    module does NOT call `.375` (the Greeks engine) itself. `.375` is an
+    isolated pure function requiring risk_free_rate/dividend_yield/
+    num_steps with no defaults of its own; this module stays a pure
+    function of its inputs the same way O6/O7 do, and expects the caller
+    to have already priced each open option leg via `.375` before
+    building the snapshot. `delta` must already carry O3's own long-
+    option sign convention (CALL in [0, 1], PUT in [-1, 0]) -- this
+    module applies only the position's LONG/SHORT direction on top.
+  - `compute_net_portfolio_delta()`: a new COMPUTABLE dimension, OPTIONS
+    POSITIONS ONLY (Martin's confirmed scope -- stock/crypto linear delta
+    is not folded in; that remains `directional_exposure`'s job). Sums
+    `delta * quantity * multiplier` across every leg with `option_detail`
+    set, sign-adjusted by `direction`. A flat option book is trivially
+    safe (`net_delta=0.0`), not `NOT_COMPUTABLE`; a leg that HAS
+    `option_detail` but is missing/malformed `delta` makes the whole
+    dimension `NOT_COMPUTABLE` (names the offending leg) rather than
+    silently excluding it from the sum -- same "cannot prove safe, don't
+    guess" discipline every other dimension in this module already uses.
+  - `compute_defined_risk_structure_max_loss()`: a new per-group
+    COMPUTABLE dimension for 2-leg net-credit vertical spreads (v1 scope,
+    matching O4/O5/O6's own vertical-only execution/exit scope). Since
+    `PositionRecord` is single-leg with no built-in notion of "these two
+    legs are one spread," the caller tags both legs of a vertical with
+    the same `structure_group_id` (a new optional field, see above) --
+    this function groups by that id and computes
+    `max_loss = (strike_width * multiplier * qty) - net_credit_received`
+    gross of any trading cost (Martin's confirmed choice: no dependency
+    on `.381`'s cost model). A group that is not exactly 2 well-formed,
+    one-long-one-short, same-right, same-expiry, same-qty legs with a
+    positive strike width is reported `NOT_COMPUTABLE` for that group
+    specifically, never guessed at.
+  - `project_post_trade_exposure()`'s `hypothetical` parameter is
+    broadened, in a strictly backward-compatible way, to also accept a
+    LIST of `PositionRecord` (not only a single one) -- needed so a
+    2-leg vertical's hypothetical ENTRY can be projected as one coherent
+    structure (both legs present at once, so `structure_group_id`
+    pairing and `net_portfolio_delta`/`defined_risk_structure_max_loss`
+    can be projected) rather than two independent single-leg calls that
+    can never see each other. Every existing single-`PositionRecord`
+    caller is unaffected -- a lone record is treated as a one-element
+    list internally.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -191,6 +248,12 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_STATE_DIR = ROOT / "state" / "portfolio_exposure"
 
 VENUES = ("MEXC", "ALPACA")
+
+# O8 extension (2026-10-07): standard US equity/ETF option contract
+# multiplier -- a structural constant (same role as .381's own
+# DEFAULT_MULTIPLIER), not an invented risk threshold. option_detail may
+# override it per-leg via an explicit "multiplier" key.
+DEFAULT_OPTION_MULTIPLIER = 100
 
 
 # ------------------------------------------------------------------------
@@ -240,6 +303,17 @@ class PositionRecord:
     liquidation_price: float | None  # MEXC only; None for Alpaca.
     raw_source_id: str | None       # positionId (MEXC) / asset_id (Alpaca), for traceability only.
     as_of: str
+    # O8 extension (2026-10-07) -- both optional, default None, so every
+    # pre-existing stock/crypto caller is unaffected. See module docstring
+    # addendum. option_detail (when set): {"strike": float, "expiry": str,
+    # "right": "CALL"|"PUT", "delta": float, "gamma": float|None,
+    # "vega": float|None, "multiplier": float|None (defaults to
+    # DEFAULT_OPTION_MULTIPLIER)} -- caller-supplied, never computed here.
+    option_detail: dict[str, Any] | None = None
+    # Ties two option legs together as one defined-risk structure (e.g.
+    # both legs of a vertical spread share the same id). None = not part
+    # of any tracked structure.
+    structure_group_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -697,6 +771,128 @@ NOT_COMPUTABLE_STATIC = {
 }
 
 
+# ------------------------------------------------------------------------
+# O8 extension (2026-10-07) -- Greeks-aware portfolio risk. See module
+# docstring addendum for full design rationale.
+# ------------------------------------------------------------------------
+
+def compute_net_portfolio_delta(positions: list[PositionRecord]) -> dict[str, Any]:
+    """Sums delta * quantity * multiplier across every OPTION leg in the
+    snapshot (positions with `option_detail` set) -- options positions
+    only, per Martin's confirmed scope (stock/crypto linear delta remains
+    `directional_exposure`'s job, not folded in here). `delta` is
+    caller-supplied (this module makes no pricing call -- see
+    `aura_v05375`'s own isolated design) and must already carry its
+    long-option sign convention; this function applies only the
+    position's own LONG/SHORT `direction` on top of that.
+
+    A flat option book (zero legs with option_detail set) is trivially
+    safe -> COMPUTABLE with net_delta=0.0, not NOT_COMPUTABLE. A leg that
+    DOES have option_detail but is missing/malformed delta cannot be
+    proven safe -> the whole dimension reports NOT_COMPUTABLE, naming the
+    offending leg(s), rather than silently excluding it from the sum."""
+    option_legs = [p for p in positions if isinstance(p.option_detail, dict)]
+    if not option_legs:
+        return {"status": "COMPUTABLE", "net_delta": 0.0, "legs_included": 0}
+
+    unpriced: list[str] = []
+    net_delta = 0.0
+    for p in option_legs:
+        delta = p.option_detail.get("delta")
+        if not isinstance(delta, (int, float)) or isinstance(delta, bool) or not math.isfinite(delta):
+            unpriced.append(f"{p.venue}:{p.symbol}")
+            continue
+        multiplier = p.option_detail.get("multiplier", DEFAULT_OPTION_MULTIPLIER)
+        sign = 1.0 if p.direction == "LONG" else -1.0
+        net_delta += sign * float(delta) * p.quantity * float(multiplier)
+
+    if unpriced:
+        return {
+            "status": "NOT_COMPUTABLE", "reason": "MISSING_OR_INVALID_DELTA",
+            "unpriced_legs": unpriced, "legs_included": len(option_legs) - len(unpriced),
+        }
+
+    return {"status": "COMPUTABLE", "net_delta": net_delta, "legs_included": len(option_legs)}
+
+
+def _max_loss_for_group(legs: list[PositionRecord]) -> dict[str, Any]:
+    """One group's max-loss computation for `compute_defined_risk_structure_
+    max_loss` below. v1 scope: exactly 2 legs, one long one short, same
+    right, same expiry, same qty, positive strike width -- matching
+    O4/O5/O6's own net-credit-vertical v1 scope. Anything else is
+    NOT_COMPUTABLE for this group specifically."""
+    if len(legs) != 2:
+        return {"status": "NOT_COMPUTABLE", "reason": "GROUP_DOES_NOT_HAVE_EXACTLY_TWO_LEGS", "leg_count": len(legs)}
+
+    directions = {leg.direction for leg in legs}
+    if directions != {"LONG", "SHORT"}:
+        return {"status": "NOT_COMPUTABLE", "reason": "GROUP_NOT_ONE_LONG_ONE_SHORT", "directions": sorted(leg.direction for leg in legs)}
+
+    details = [leg.option_detail for leg in legs]
+    if any(not isinstance(d, dict) for d in details):
+        return {"status": "NOT_COMPUTABLE", "reason": "MISSING_OPTION_DETAIL"}
+
+    rights = {d.get("right") for d in details}
+    if rights != {"CALL"} and rights != {"PUT"}:
+        return {"status": "NOT_COMPUTABLE", "reason": "GROUP_MIXED_OR_INVALID_RIGHTS", "rights": sorted(str(r) for r in rights)}
+
+    expiries = {d.get("expiry") for d in details}
+    if len(expiries) != 1 or None in expiries:
+        return {"status": "NOT_COMPUTABLE", "reason": "GROUP_MIXED_OR_MISSING_EXPIRIES"}
+
+    qtys = {leg.quantity for leg in legs}
+    if len(qtys) != 1:
+        return {"status": "NOT_COMPUTABLE", "reason": "GROUP_LEG_QTY_MISMATCH", "quantities": sorted(qtys)}
+    qty = next(iter(qtys))
+
+    strikes: dict[str, float] = {}
+    for leg, detail in zip(legs, details):
+        strike = detail.get("strike")
+        if not isinstance(strike, (int, float)) or isinstance(strike, bool) or not math.isfinite(strike) or strike <= 0:
+            return {"status": "NOT_COMPUTABLE", "reason": "INVALID_STRIKE", "symbol": leg.symbol}
+        strikes[leg.direction] = float(strike)
+
+    strike_width = abs(strikes["SHORT"] - strikes["LONG"])
+    if strike_width <= 0:
+        return {"status": "NOT_COMPUTABLE", "reason": "ZERO_STRIKE_WIDTH"}
+
+    long_leg = next(leg for leg in legs if leg.direction == "LONG")
+    short_leg = next(leg for leg in legs if leg.direction == "SHORT")
+    multiplier = float(details[0].get("multiplier", DEFAULT_OPTION_MULTIPLIER))
+
+    net_credit_received = (short_leg.entry_price - long_leg.entry_price) * multiplier * qty
+    max_loss = (strike_width * multiplier * qty) - net_credit_received
+
+    return {
+        "status": "COMPUTABLE",
+        "max_loss": max_loss,
+        "strike_width": strike_width,
+        "net_credit_received": net_credit_received,
+        "multiplier": multiplier,
+        "qty": qty,
+        "long_symbol": long_leg.symbol,
+        "short_symbol": short_leg.symbol,
+    }
+
+
+def compute_defined_risk_structure_max_loss(positions: list[PositionRecord]) -> dict[str, dict[str, Any]]:
+    """Groups option legs sharing the same `structure_group_id` into
+    defined-risk structures (v1: 2-leg net-credit verticals) and computes
+    each group's `max_loss = (strike_width * multiplier * qty) -
+    net_credit_received`, GROSS of any trading cost (Martin's confirmed
+    choice, 2026-10-07: no dependency on `.381`'s cost model). Positions
+    with no `structure_group_id` are not part of any group and are not
+    reported here (they're still covered by `net_portfolio_delta` and
+    every notional-based dimension above). Returns one entry per
+    group_id, keyed and sorted by that id."""
+    groups: dict[str, list[PositionRecord]] = {}
+    for p in positions:
+        if isinstance(p.option_detail, dict) and p.structure_group_id:
+            groups.setdefault(p.structure_group_id, []).append(p)
+
+    return {group_id: _max_loss_for_group(groups[group_id]) for group_id in sorted(groups)}
+
+
 def compute_exposure_dimensions(
     snapshot: PortfolioSnapshot, equity_history: list[dict[str, Any]], *, mexc_leverage_cap: float | None = None,
 ) -> dict[str, Any]:
@@ -726,17 +922,36 @@ def compute_exposure_dimensions(
     report["leverage_exposure"] = compute_leverage_exposure(positions, equity_by_venue)
     report["crypto_funding_basis_exposure"] = {"status": "SEE_fetch_mexc_funding_exposure", "reason": "requires a live per-symbol funding-rate call, not a pure function of the snapshot alone"}
     report["mexc_leverage_cap_check"] = check_mexc_leverage_cap(positions, mexc_leverage_cap)
+    # O8 extension (2026-10-07) -- see module docstring addendum.
+    report["net_portfolio_delta"] = compute_net_portfolio_delta(positions)
+    report["defined_risk_structure_max_loss"] = compute_defined_risk_structure_max_loss(positions)
 
     return report
 
 
 def project_post_trade_exposure(
-    snapshot: PortfolioSnapshot, equity_history: list[dict[str, Any]], hypothetical: PositionRecord, *, mexc_leverage_cap: float | None = None,
+    snapshot: PortfolioSnapshot, equity_history: list[dict[str, Any]],
+    hypothetical: PositionRecord | list[PositionRecord], *, mexc_leverage_cap: float | None = None,
 ) -> dict[str, Any]:
-    """Dimension 12: projected post-trade risk. Overlays one hypothetical
-    position onto the current snapshot (never mutates it) and recomputes
-    the notional-dependent dimensions. Deterministic, no network call."""
-    projected_positions = list(snapshot.positions) + [hypothetical]
+    """Dimension 12: projected post-trade risk. Overlays one or more
+    hypothetical positions onto the current snapshot (never mutates it)
+    and recomputes the notional- and Greeks-dependent dimensions.
+    Deterministic, no network call.
+
+    O8 extension (2026-10-07): `hypothetical` may now be a single
+    PositionRecord (pre-existing behavior, unchanged) OR a list/tuple of
+    them -- broadened so a 2-leg vertical's hypothetical ENTRY can be
+    projected as one coherent structure (both legs present together, so
+    structure_group_id pairing resolves and defined_risk_structure_max_loss
+    is projectable) rather than via two independent single-leg calls that
+    can never see each other. Dispatches on list/tuple-ness rather than
+    `isinstance(hypothetical, PositionRecord)` deliberately: this module is
+    sometimes exec'd more than once under the same module name by a caller
+    that also loads `.344` (each load produces its own distinct
+    PositionRecord class object), so a class-identity check here would be
+    fragile across that boundary -- duck-typing on list/tuple is not."""
+    hypothetical_list = list(hypothetical) if isinstance(hypothetical, (list, tuple)) else [hypothetical]
+    projected_positions = list(snapshot.positions) + hypothetical_list
     projected_snapshot = _build_snapshot(snapshot.as_of, projected_positions, snapshot.venue_fetch_status)
     before = compute_exposure_dimensions(snapshot, equity_history, mexc_leverage_cap=mexc_leverage_cap)
     after = compute_exposure_dimensions(projected_snapshot, equity_history, mexc_leverage_cap=mexc_leverage_cap)
@@ -745,9 +960,13 @@ def project_post_trade_exposure(
         "before": {
             "portfolio_heat": before["portfolio_heat"], "directional_exposure": before["directional_exposure"],
             "leverage_exposure": before["leverage_exposure"], "mexc_leverage_cap_check": before["mexc_leverage_cap_check"],
+            "net_portfolio_delta": before["net_portfolio_delta"],
+            "defined_risk_structure_max_loss": before["defined_risk_structure_max_loss"],
         },
         "after": {
             "portfolio_heat": after["portfolio_heat"], "directional_exposure": after["directional_exposure"],
             "leverage_exposure": after["leverage_exposure"], "mexc_leverage_cap_check": after["mexc_leverage_cap_check"],
+            "net_portfolio_delta": after["net_portfolio_delta"],
+            "defined_risk_structure_max_loss": after["defined_risk_structure_max_loss"],
         },
     }
