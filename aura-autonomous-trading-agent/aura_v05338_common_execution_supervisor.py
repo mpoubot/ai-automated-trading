@@ -398,6 +398,178 @@ discipline (a dedicated test proves an AI_PROPOSAL and a
 DETERMINISTIC_SIGNAL decision are supervised identically).
 
 No real credentials, no network call, anywhere in this file.
+
+============================================================================
+7. O9 -- Options supervisor integration (added 2026-10-07, extending this
+   file in place -- no new module number, same convention `.343`/`.344`
+   used for their own O8 extension)
+============================================================================
+
+Options orders had NO supervisor path at all before this addition --
+every equity/crypto order already flows through the fail-closed,
+PAPER-only, kill-switch-gated discipline above; options did not. This
+section wires the five already-built options modules (O4 `.376`, O4B
+`.377`, O5 `.378`/`.379`, O6 `.380`, O7 `.381`) and O8's enforcement hard
+gate (`.344.evaluate_hypothetical_trade()`) into that SAME discipline,
+never a separate, weaker path. `.376`-`.381`/`.343`/`.344` are read-only
+dependencies here, exactly like every other module this file imports --
+none of them is modified.
+
+Three new entry points, mirroring the existing MEXC/Alpaca shape:
+  - `supervise_options_execution()`      -- OPEN decisions (new risk).
+  - `supervise_options_exit_execution()` -- O6 CLOSE decisions. A
+    DEDICATED entry point, not a branch inside the open-path function,
+    because its kill-switch treatment is the deliberate OPPOSITE of
+    every other entry point in this file (see below).
+  - `supervise_options_reconciliation_pass()` -- mirrors
+    `supervise_mexc_reconciliation_pass()`'s shape, calling O4B's
+    `reconcile()` instead of MEXC's `.30`.
+
+Crash-recovery / idempotency design decision (the question explicitly
+asked: does `.379`'s own claim layer already give this module enough
+state on its own, or is a new ledger needed?) -- NEITHER extreme is
+right, and the answer is already proven elsewhere in THIS file:
+  - `.379.claim()` keys its durable claim on `authorization_id` -- but
+    `.378.authorize()` mints a FRESH, random `authorization_id` on every
+    call (confirmed by direct reading, exactly like `.31.authorize()`/
+    `.36.authorize()` do for their own venues). So `.379` alone does
+    GUARANTEE no authorization_id is ever double-consumed, but it does
+    NOT by itself make a RETRY with the same `client_order_id` idempotent
+    -- a second `authorize()` call for the identical spec gets a brand
+    new authorization_id, which `.379` will happily claim a second time,
+    which would durably construct (and, if `attempt_submission=True`,
+    submit) the SAME order twice. This is the EXACT gap the Alpaca-equity
+    path above already hit and already fixed with its own NEW, Supervisor-
+    owned, client_order_id-keyed claim layer (`claim_alpaca_client_order_id()`
+    / `ALPACA_CLIENT_ORDER_ID_RE`, section 5 above) -- NOT by inventing a
+    full MEXC-style intent ledger (`.29`), which would be building far more
+    machinery (lifecycle STATE: CLAIMED/SUBMISSION_ATTEMPTED/AWAITING_
+    RECONCILIATION/etc., none of which the options spine has or needs
+    today) than the actual gap requires.
+  - A repo-wide grep for "intent_ledger"/"ledger" across every
+    `aura_v0537*.py`/`aura_v0538*.py` file (done before writing any code
+    here) confirms no options-specific intent ledger exists anywhere.
+  - The SIMPLEST correct fix, already proven in this exact file for the
+    structurally identical Alpaca-equity problem, is reused again here:
+    `claim_options_client_order_id()` / `OPTIONS_CLIENT_ORDER_ID_RE`
+    below -- a second, Supervisor-owned, atomic O_CREAT|O_EXCL claim
+    keyed by `client_order_id` (never released, same discipline as every
+    other claim store in this codebase). This is sufficient: calling
+    `supervise_options_execution()` twice with the same `client_order_id`
+    claims a NEW `.379` authorization_id each time (harmless -- `.379`
+    just has two valid-but-unused claims on file) but the SECOND call's
+    own `claim_options_client_order_id()` call is refused, so `.376.submit()`
+    is reached at most once per `client_order_id`, exactly the guarantee
+    actually needed. No new intent ledger is built; none is needed.
+  - Residual, DISCLOSED limitation (identical in kind to the one already
+    accepted for the Alpaca-equity path above, not a new problem
+    introduced here): if a crash happens in the narrow window AFTER
+    `claim_options_client_order_id()` grants but BEFORE `.376.submit()`
+    actually runs, that `client_order_id` is permanently claimed with no
+    real order ever having been submitted. This is an accepted
+    consequence of the "never release a claim" design used by every
+    claim store in this codebase (`.27`, `.29`, `.32`, `.37`, `.379`,
+    and this module's own two local claim layers) -- trading a
+    vanishingly narrow crash window for a strong, simple anti-double-
+    submission guarantee. Not fixed here, same as it is not fixed for
+    Alpaca equities today.
+
+Construction-only preview (`attempt_submission=False`) -- the MEXC
+lesson, not the Alpaca one. `.378.authorized_order_request()` FUSES
+`.379`'s claim with order construction into ONE atomic call, exactly
+like `.31.authorized_submit()` does for MEXC (NOT like `.36.
+authorized_order_request()`/`.37.claim()` for Alpaca equities, which are
+claimed unconditionally even during a preview). So
+`supervise_options_execution()`/`supervise_options_exit_execution()`
+follow the MEXC precedent here, not the Alpaca one: a preview calls
+`.378.authorize()` ONLY and stops -- it never calls `authorized_order_
+request()`, so it never touches `.379`'s claim store or this module's
+own `claim_options_client_order_id()` claim store either. Calling the
+fused claim+construct call during a preview would durably burn a `.379`
+claim (and this module's own client_order_id claim) for a submission
+that never really happened -- the identical "earlier draft bug" already
+found and fixed for MEXC above, deliberately not repeated here.
+
+O4B (`.377`) as a HARD GATE (Martin's explicit decision) -- `.377` itself
+is DETECTION ONLY (its own docstring: "enforcement of a freeze decision
+... is O9's job ... not yet built"). `supervise_options_execution()` is
+that enforcement: it calls `.377.reconcile()` fresh on every call (no
+caching, matching `.377`'s own "never fabricate or reuse stale evidence"
+principle) and FAILS CLOSED, before ever calling `.378.authorize()`, if
+the proposed trade's underlying is in `.377`'s own `frozen_underlyings`
+list. The caller must supply a real (in production) or faked (every test
+here) read-only Alpaca client plus AURA's own expected-positions list and
+a `lookback_days` -- all REQUIRED (no default; `.377`'s own `lookback_days`
+has none either, and this module does not invent one). Missing any of
+them fails closed rather than silently skipping the freeze check.
+`supervise_options_exit_execution()` deliberately does NOT re-check this
+gate -- Martin's decision scopes the freeze hard-gate to NEW (open)
+decisions only; closing an existing position is never blocked by it.
+
+O8 (`.344.evaluate_hypothetical_trade()`) as a second HARD GATE -- called
+after the freeze gate and the dynamic kill-switch check, before
+`.378.authorize()`, exactly matching `.344`'s own description of itself
+as an "authorization-time gate." Every input it needs
+(`portfolio_snapshot`/`portfolio_hypothetical`/`portfolio_limits`/
+`portfolio_max_snapshot_age_seconds`) is REQUIRED and caller-supplied --
+this module never builds a `.343` PortfolioSnapshot or a Greeks-bearing
+PositionRecord itself, and never computes a Greek anywhere (per Martin's
+explicit instruction: O8 is a pure function of caller-supplied exposure
+data, never a Greeks source). An `overall_verdict == "BLOCK"` fails
+closed before authorization, exactly like the static/dynamic kill
+switch; the full `EnforcementDecision` is attached to the result either
+way (ALLOW or BLOCK) for audit. `supervise_options_exit_execution()`
+deliberately does NOT call this gate either -- reducing/closing existing
+risk is never blocked by a portfolio-exposure limit designed to stop NEW
+risk from being taken on.
+
+O7 (`.381.estimate_round_trip_cost()`) as INFORMATIONAL ONLY -- computed
+(when `cost_model_config`/`cost_model_leg_quotes` are supplied) and
+attached to the result as `cost_estimate` for audit/visibility, but its
+outcome can NEVER produce a BLOCKED result on its own -- `.381` has no
+configured limit to breach, it is pure arithmetic (its own docstring:
+"estimation function"). Any exception raised while computing it is
+caught and recorded in `cost_estimate` itself, never propagated and never
+treated as a block reason.
+
+O6 (`.380`) kill-switch INVERSION, extended here for the first time to an
+actual execution path -- `supervise_options_exit_execution()` DOES read
+the Supervisor's own kill switch (both static and dynamic), the one
+place in this entire function it is read, but it is never used to
+produce a BLOCKED result. It is used ONLY to compute the
+`kill_switch_engaged` argument handed to `.380.evaluate_exit()` --
+`forced_close = bool(cfg["kill_switch"]) or static_kill_switch_engaged()`
+-- whose OWN inversion (True FORCES an emergency close, per its own
+docstring and Martin's explicit confirmation: "a kill switch must never
+accidentally block the exits it triggers") then does the actual work:
+with `kill_switch_engaged=True`, KILL_SWITCH is `.380`'s own highest-
+priority trigger, evaluated unconditionally, so `evaluate_exit()` always
+returns `action="CLOSE"`. From that point on, this function applies NO
+further kill-switch check of any kind before authorizing/claiming/
+submitting the close. This is a DELIBERATE, EXPLICITLY-CONFIRMED
+departure from this module's own existing language in section 5 above
+("a CLOSE_LONG/CLOSE_SHORT decision is itself a new execution attempt
+and is blocked by the kill switch exactly like an OPEN, consistent with
+every other module in this chain") -- that sentence described every
+module BEFORE `.380` existed. When the Supervisor's kill switch is OFF,
+`.380` evaluates normally and may just as well return HOLD (handled by
+stopping immediately, before any authorization/claim/construction is
+even attempted) -- the inversion only ever matters when the switch is
+actually engaged. This is flagged here explicitly, not silently done,
+because it changes this file's own stated kill-switch philosophy for
+exactly one, options-specific, closing-only path.
+
+No audit-trail (`.340`) integration for any options entry point --
+`.378`'s own docstring explicitly defers this "most naturally O9,"
+confirming it is a known, disclosed gap rather than an oversight; wiring
+options into the SAME shared `.340` trail used by equity/MEXC without
+first confirming that trail is genuinely venue-agnostic is a real risk of
+silently corrupting or conflating it, not something to guess at here. No
+live chain/quote recheck at the options supervisor layer either -- `.378`
+itself already made this same call for its own layer (module docstring
+item 2) and this module does not second-guess it. No modification to
+`.343`/`.344`/`.373`-`.381` -- all read-only, dynamically imported,
+called only through their existing public functions.
 """
 from __future__ import annotations
 
@@ -405,7 +577,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +604,10 @@ DEFAULT_MEXC_ADAPTER_CLAIMS_DIR = Path("regime_output/common_execution_superviso
 DEFAULT_MEXC_LEDGER_DIR = Path("regime_output/common_execution_supervisor/mexc_intent_ledger")
 DEFAULT_ALPACA_AUTH_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/alpaca_authorization_claims")
 DEFAULT_ALPACA_CLIENT_ORDER_ID_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/alpaca_client_order_id_claims")
+
+# O9 options dependencies -- see module docstring §7.
+DEFAULT_OPTIONS_AUTH_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/options_authorization_claims")
+DEFAULT_OPTIONS_CLIENT_ORDER_ID_CLAIMS_DIR = Path("regime_output/common_execution_supervisor/options_client_order_id_claims")
 
 
 def fail(message: str) -> None:
@@ -534,6 +710,32 @@ def _load_mexc_authorization_module():
 
 def _load_revalidation_module():
     return _load_module("aura_v05340_pre_submission_revalidation", "aura_v05340_pre_submission_revalidation.py")
+
+
+# --- O9 options dependencies (added 2026-10-07 -- see module docstring §7) ---
+
+def _load_options_adapter_module():
+    return _load_module("aura_v05376_options_execution_adapter", "aura_v05376_options_execution_adapter.py")
+
+
+def _load_options_reconciliation_module():
+    return _load_module("aura_v05377_options_assignment_reconciliation", "aura_v05377_options_assignment_reconciliation.py")
+
+
+def _load_options_authorization_module():
+    return _load_module("aura_v05378_options_execution_authorization", "aura_v05378_options_execution_authorization.py")
+
+
+def _load_options_exit_engine_module():
+    return _load_module("aura_v05380_options_exit_engine", "aura_v05380_options_exit_engine.py")
+
+
+def _load_options_cost_model_module():
+    return _load_module("aura_v05381_options_cost_model", "aura_v05381_options_cost_model.py")
+
+
+def _load_portfolio_enforcement_module():
+    return _load_module("aura_v05344_portfolio_exposure_enforcement", "aura_v05344_portfolio_exposure_enforcement.py")
 
 
 def _audit_write_best_effort(revalidation40: Any, fn_name: str, *args: Any, **kwargs: Any) -> None:
@@ -652,6 +854,35 @@ def claim_alpaca_client_order_id(claims_dir: Path, client_order_id: str) -> bool
     function anywhere in this module (checked by a dedicated structural
     test, mirroring `.32`/`.37`'s own)."""
     if not isinstance(client_order_id, str) or not ALPACA_CLIENT_ORDER_ID_RE.match(client_order_id):
+        fail(f"INVALID_CLIENT_ORDER_ID:{client_order_id!r}")
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    claim_path = claims_dir / f"{client_order_id}.claimed"
+    try:
+        fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        f.write(now())
+    return True
+
+
+# O9 options local claim layer -- see module docstring §7's crash-
+# recovery/idempotency discussion for why this exists, and why it is a
+# second, DISTINCT claim store from the one just above (a separate
+# claims directory, keyed the same way, for a different venue/asset
+# class) rather than the Alpaca-equity one being reused directly.
+OPTIONS_CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def claim_options_client_order_id(claims_dir: Path, client_order_id: str) -> bool:
+    """Atomic, single-use claim on an options MLEG order's client_order_id,
+    owned by the Supervisor, separate from `.379`'s authorization_id
+    store. Returns True if THIS call granted the claim, False if already
+    claimed. Never released, under any outcome -- there is deliberately
+    no release/delete function anywhere in this module (checked by a
+    dedicated structural test, mirroring `claim_alpaca_client_order_id()`'s
+    own identical property)."""
+    if not isinstance(client_order_id, str) or not OPTIONS_CLIENT_ORDER_ID_RE.match(client_order_id):
         fail(f"INVALID_CLIENT_ORDER_ID:{client_order_id!r}")
     claims_dir.mkdir(parents=True, exist_ok=True)
     claim_path = claims_dir / f"{client_order_id}.claimed"
@@ -1413,6 +1644,552 @@ def supervise_mexc_reconciliation_pass(
     }
 
 
+# ======================================================================= #
+# O9 -- Options (Alpaca 2-leg vertical spread) supervision. Added
+# 2026-10-07, extending this file in place. See module docstring §7 for
+# the full design rationale (crash-recovery decision, kill-switch
+# inversion for the exit path, O4B/O8 hard gates, O7 informational-only
+# cost estimate).
+# ======================================================================= #
+
+def _options_pseudo_spec(underlying_symbol: str | None, client_order_id: str | None,
+                          direction: str | None = None) -> dict[str, Any]:
+    """Options has no `.33`-equivalent canonical-spec layer (`.378`'s own
+    module docstring item 0), so there is no real canonical_spec dict to
+    hand `_base_result()`/`_blocked()` the way the MEXC/Alpaca-equity
+    paths do. This builds the minimal dict those two SHARED helpers
+    actually read (`venue`/`asset_class`/`symbol`/`direction`/
+    `client_order_id`/`spec_fingerprint`) so this module's options paths
+    can reuse them unchanged, exactly like every other result shape in
+    this file."""
+    return {
+        "venue": "ALPACA", "asset_class": "OPTION", "symbol": underlying_symbol,
+        "direction": direction, "client_order_id": client_order_id, "spec_fingerprint": None,
+    }
+
+
+def _options_authorize(spec: dict[str, Any], *, environment: str, auth_config: dict[str, Any] | None,
+                        auth_claims_dir: Path, now_dt: datetime | None) -> tuple[tuple[str, str, Any] | None, dict[str, Any]]:
+    """Shared `.378.authorize()` call, used by BOTH
+    `supervise_options_execution()` (OPEN) and
+    `supervise_options_exit_execution()` (CLOSE) -- identical sequence in
+    both. Returns `(blocked, record)`: `blocked` is `None` on success, or
+    `(stage, reason, detail)` when `record["status"] != "AUTHORIZED"`.
+    Deliberately stops here and does NOT call `.378.authorized_order_
+    request()` -- that is the caller's job, and only when
+    `attempt_submission=True` (module docstring §7's construction-only-
+    preview discussion: this function alone touches nothing durable)."""
+    auth78 = _load_options_authorization_module()
+    record = auth78.authorize(spec, environment=environment, config=auth_config,
+                               claims_dir=auth_claims_dir, now=now_dt)
+    if record.get("status") != "AUTHORIZED":
+        return ("AUTHORIZATION", record.get("reason"), record.get("detail")), record
+    return None, record
+
+
+def _options_claim_and_submit(record: dict[str, Any], spec: dict[str, Any], *, environment: str,
+                               auth_config: dict[str, Any] | None, auth_claims_dir: Path,
+                               supervisor_claims_dir: Path, alpaca_client: Any,
+                               now_dt: datetime | None) -> dict[str, Any]:
+    """Shared tail, used by BOTH options entry points, called ONLY when
+    `attempt_submission=True` (never during a construction-only preview
+    -- see module docstring §7). Sequence: `.378.authorized_order_
+    request()` (revalidate -> `.379` claim -> `.376` pure construction)
+    -> this module's OWN local client_order_id claim (second layer,
+    mirrors `claim_alpaca_client_order_id()`'s role for Alpaca equities,
+    module docstring §7's crash-recovery discussion) -> order-payload
+    digest check (same invariant `supervise_alpaca_equity_execution()`
+    already enforces, reused here for the identical reason) -> `.376.
+    submit()`, wrapped exactly like `.35.submit()` is wrapped above
+    (module docstring §2's EXECUTION_UNCERTAIN discipline -- `.376.
+    submit()` has the identical gap: no exception classification of its
+    own around `client.submit_order()`).
+
+    Returns a dict with `"blocked": True` plus `stage`/`reason`/`detail`
+    (and any extra fields such as `order_spec`/`existing_claim`) on any
+    rejection, or `"blocked": False` plus `order_spec`/`order_spec_digest`/
+    `submission_result` on completion. Extracted as a SHARED helper
+    (unlike the MEXC/Alpaca-equity split elsewhere in this file, which is
+    deliberately NOT shared because those two venues' plumbing genuinely
+    differs) because the open and exit options paths call this exact
+    `.378`/`.379`/`.376` sequence byte-for-byte -- sharing it removes the
+    risk of a future safety fix landing in only one copy."""
+    auth78 = _load_options_authorization_module()
+    order_request = auth78.authorized_order_request(
+        record, spec, auth_claims_dir, environment=environment, config=auth_config, now=now_dt,
+    )
+    if order_request["status"] == "AUTHORIZATION_ALREADY_CONSUMED":
+        return {
+            "blocked": True, "stage": "REPLAY_PROTECTION", "reason": order_request.get("reason"),
+            "detail": order_request.get("detail"),
+            "existing_client_order_id": order_request.get("existing_client_order_id"),
+            "existing_claim": order_request.get("existing_claim"),
+        }
+    if order_request["status"] == "CLAIM_STORE_UNREACHABLE":
+        return {"blocked": True, "stage": "REPLAY_PROTECTION", "reason": order_request.get("reason"),
+                "detail": order_request.get("detail")}
+    if order_request["status"] != "AUTHORIZED_ORDER_REQUEST_READY":
+        return {"blocked": True, "stage": "REVALIDATION", "reason": order_request.get("reason"),
+                "detail": order_request.get("detail")}
+
+    # Order-payload digest -- identical rationale to the one documented at
+    # length above `supervise_alpaca_equity_execution()`'s own call site:
+    # a SHA-256 of the canonical JSON of the exact dict `.378` just
+    # handed back, taken now and rechecked immediately before `.376.
+    # submit()`, so a future edit that mutates `order_spec` in between
+    # fails closed instead of silently submitting a drifted order.
+    order_spec = order_request["order_spec"]
+    order_spec_digest = sha256_text(stable_json(order_spec))
+
+    # Second, local claim layer -- see claim_options_client_order_id()'s
+    # own docstring and module docstring §7. `.379`'s authorization_id
+    # claim is already permanently consumed at this point and stays that
+    # way regardless of what happens below (never released).
+    granted = claim_options_client_order_id(supervisor_claims_dir, order_spec["client_order_id"])
+    if not granted:
+        return {
+            "blocked": True, "stage": "SUPERVISOR_CLIENT_ORDER_ID_CLAIM",
+            "reason": "CLIENT_ORDER_ID_ALREADY_CLAIMED_AT_SUPERVISOR_LAYER",
+            "detail": ("authorization_id claim succeeded but this client_order_id was already claimed by a "
+                        "different authorization attempt -- a genuine anomaly, not an ordinary replay"),
+            "status_override": "AUTHORIZED_BUT_SUPERVISOR_CLAIM_REJECTED",
+            "order_spec": order_spec, "order_spec_digest": order_spec_digest,
+        }
+
+    if alpaca_client is None:
+        return {
+            "blocked": True, "stage": "SUBMISSION", "reason": "MISSING_ALPACA_CLIENT",
+            "detail": ("attempt_submission=True requires an already-constructed alpaca_client; "
+                        "this module never constructs one itself"),
+            "order_spec": order_spec, "order_spec_digest": order_spec_digest,
+        }
+
+    # NO intervening logic between this point and the actual .376.submit()
+    # call below, beyond the digest recheck immediately following -- same
+    # discipline as supervise_alpaca_equity_execution()'s identical
+    # comment above its own submit() call.
+    resubmission_digest = sha256_text(stable_json(order_spec))
+    if resubmission_digest != order_spec_digest:
+        return {
+            "blocked": True, "stage": "ORDER_PAYLOAD_INTEGRITY", "reason": "ORDER_PAYLOAD_DIGEST_MISMATCH",
+            "detail": "order_spec changed between authorization and submission -- refusing to submit",
+            "order_spec": order_spec, "order_spec_digest": order_spec_digest,
+            "resubmission_digest": resubmission_digest,
+        }
+
+    adapter76 = _load_options_adapter_module()
+    try:
+        submission_result = adapter76.submit(order_spec, alpaca_client)
+    except Exception as exc:  # noqa: BLE001 -- see module docstring §2: `.376.submit()` has no
+        # exception classification of its own, the identical gap `.35.submit()` has.
+        submission_result = {
+            "adapter_version": adapter76.VERSION,
+            "status": "EXECUTION_UNCERTAIN",
+            "client_order_id": order_spec["client_order_id"],
+            "observed_at": now(),
+            "paper": True,
+            "live": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "blocked": False, "order_spec": order_spec, "order_spec_digest": order_spec_digest,
+        "submission_result": submission_result,
+    }
+
+
+def supervise_options_execution(
+    execution_spec: dict[str, Any],
+    *,
+    environment: str = "PAPER",
+    auth_config: dict[str, Any] | None = None,
+    auth_claims_dir: Path | None = None,
+    supervisor_claims_dir: Path | None = None,
+    expected_options_positions: list[dict[str, Any]] | None = None,
+    reconciliation_client: Any = None,
+    reconciliation_lookback_days: int | None = None,
+    portfolio_snapshot: Any = None,
+    portfolio_hypothetical: Any = None,
+    portfolio_limits: Any = None,
+    portfolio_max_snapshot_age_seconds: float | None = None,
+    portfolio_equity_history: list[dict[str, Any]] | None = None,
+    cost_model_config: dict[str, Any] | None = None,
+    cost_model_leg_quotes: dict[str, Any] | None = None,
+    attempt_submission: bool = False,
+    alpaca_client: Any = None,
+    supervisor_config: dict[str, Any] | None = None,
+    now_dt: datetime | None = None,
+) -> dict[str, Any]:
+    """The single entry point for a NEW options (2-leg Alpaca vertical
+    spread) execution decision -- see module docstring §7. Sequence:
+    static kill switch -> `execution_spec` type check -> environment gate
+    -> `.376.validate_vertical_spec()` (fresh, independent structural
+    check, giving this function `underlying_symbol`/`client_order_id`
+    before anything else can run) -> O4B (`.377`) assignment/exercise
+    freeze HARD GATE -> Supervisor's own dynamic kill switch -> O8
+    (`.344.evaluate_hypothetical_trade()`) portfolio-exposure HARD GATE ->
+    O7 (`.381.estimate_round_trip_cost()`) informational-only cost
+    estimate -> `.378.authorize()` -> (only if `attempt_submission=True`)
+    `.378.authorized_order_request()` (claim + construct) -> this
+    module's own client_order_id claim -> `.376.submit()`.
+
+    `expected_options_positions`/`reconciliation_client`/
+    `reconciliation_lookback_days` and `portfolio_snapshot`/
+    `portfolio_hypothetical`/`portfolio_limits`/
+    `portfolio_max_snapshot_age_seconds` are ALL required (default `None`
+    only so a missing one produces a clearly-named BLOCKED reason instead
+    of a bare TypeError, matching this file's existing `exchange is None`/
+    `alpaca_client is None` convention) -- both hard gates run on EVERY
+    call, preview or real submission alike (module docstring §7: a
+    preview must still prove the spec passes every gate, not just that
+    it is structurally well-formed). `cost_model_config`/
+    `cost_model_leg_quotes` are genuinely optional -- omitting them simply
+    means `cost_estimate` comes back `None` (O7 is informational only;
+    see module docstring §7)."""
+    if static_kill_switch_engaged():
+        return _blocked(
+            None, "SUPERVISOR_KILL_SWITCH", "STATIC_KILL_SWITCH_ENGAGED",
+            f"{STATIC_KILL_SWITCH_ENV_VAR} is set in the process environment -- this overrides any "
+            f"supervisor_config value and cannot be cleared by any caller; unset it in the deployment "
+            f"environment to resume.",
+        )
+    cfg = load_supervisor_config(supervisor_config)
+    auth_claims_dir = auth_claims_dir or DEFAULT_OPTIONS_AUTH_CLAIMS_DIR
+    supervisor_claims_dir = supervisor_claims_dir or DEFAULT_OPTIONS_CLIENT_ORDER_ID_CLAIMS_DIR
+
+    if not isinstance(execution_spec, dict):
+        return _blocked(None, "EXECUTION_SPEC", "INVALID_EXECUTION_SPEC", "not a dict")
+
+    if environment not in ALLOWED_ENVIRONMENTS:
+        reason = "LIVE_EXECUTION_NOT_SUPPORTED_FOR_OPTIONS" if environment == "LIVE" else "UNSUPPORTED_ENVIRONMENT"
+        return _blocked(None, "ENVIRONMENT", reason, environment)
+
+    # Fresh, independent structural check -- never cached, never trusted
+    # from a later `.378.authorize()` call (which re-validates again
+    # internally; same "always fresh" discipline `.378`'s own docstring
+    # item 1 requires of itself). This is the ONLY way this function
+    # learns `underlying_symbol` before the O4B freeze gate can run.
+    adapter76 = _load_options_adapter_module()
+    try:
+        validated = adapter76.validate_vertical_spec(execution_spec)
+    except RuntimeError as exc:
+        return _blocked(None, "STRUCTURE_VALIDATION", "STRUCTURE_VALIDATION_FAILED", str(exc))
+
+    underlying_symbol = validated["structure"]["underlying_symbol"]
+    client_order_id = validated["client_order_id"]
+    pseudo_spec = _options_pseudo_spec(underlying_symbol, client_order_id)
+
+    # --- O4B (.377) assignment/exercise freeze -- HARD GATE (Martin's
+    # explicit decision; .377 itself is detection-only, see module
+    # docstring §7). Required inputs fail closed rather than silently
+    # skipping the check.
+    if expected_options_positions is None:
+        return _blocked(pseudo_spec, "ASSIGNMENT_FREEZE_CHECK", "MISSING_EXPECTED_OPTIONS_POSITIONS",
+                         "supervise_options_execution() requires AURA's own expected options positions to "
+                         "reconcile against -- this module never fabricates that list itself")
+    if reconciliation_client is None:
+        return _blocked(pseudo_spec, "ASSIGNMENT_FREEZE_CHECK", "MISSING_RECONCILIATION_CLIENT",
+                         "attempt_submission=False still requires a real (or faked, in tests) read-only "
+                         "Alpaca client to check for an open assignment/exercise freeze -- this module never "
+                         "constructs one itself")
+    if reconciliation_lookback_days is None:
+        return _blocked(pseudo_spec, "ASSIGNMENT_FREEZE_CHECK", "MISSING_RECONCILIATION_LOOKBACK_DAYS",
+                         "`.377.reconcile()` has no built-in default for lookback_days; this module does not "
+                         "invent one either")
+
+    recon77 = _load_options_reconciliation_module()
+    try:
+        reconciliation = recon77.reconcile(
+            expected_options_positions, reconciliation_client, lookback_days=reconciliation_lookback_days,
+        )
+    except RuntimeError as exc:
+        return _blocked(pseudo_spec, "ASSIGNMENT_FREEZE_CHECK", "RECONCILIATION_FAILED", str(exc))
+
+    if underlying_symbol in reconciliation.get("frozen_underlyings", []):
+        return _blocked(
+            pseudo_spec, "ASSIGNMENT_FREEZE_CHECK", "UNDERLYING_FROZEN_PENDING_ASSIGNMENT_EXERCISE_RESOLUTION",
+            reconciliation["underlyings"].get(underlying_symbol), reconciliation=reconciliation,
+        )
+
+    if cfg["kill_switch"]:
+        return _blocked(pseudo_spec, "SUPERVISOR_KILL_SWITCH", "SUPERVISOR_KILL_SWITCH_ENGAGED",
+                         reconciliation=reconciliation)
+
+    # --- O8 (.344) portfolio-exposure enforcement -- second HARD GATE.
+    # Every input is caller-supplied; this module never computes a Greek
+    # or builds a .343 snapshot itself (module docstring §7).
+    if portfolio_snapshot is None:
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "MISSING_PORTFOLIO_SNAPSHOT", None,
+                         reconciliation=reconciliation)
+    if portfolio_hypothetical is None:
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "MISSING_PORTFOLIO_HYPOTHETICAL", None,
+                         reconciliation=reconciliation)
+    if portfolio_limits is None:
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "MISSING_PORTFOLIO_LIMITS", None,
+                         reconciliation=reconciliation)
+    if portfolio_max_snapshot_age_seconds is None:
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "MISSING_PORTFOLIO_MAX_SNAPSHOT_AGE_SECONDS",
+                         None, reconciliation=reconciliation)
+
+    enf344 = _load_portfolio_enforcement_module()
+    try:
+        enforcement_decision = enf344.evaluate_hypothetical_trade(
+            portfolio_snapshot, portfolio_equity_history or [], portfolio_hypothetical, portfolio_limits,
+            max_snapshot_age_seconds=portfolio_max_snapshot_age_seconds, now=now_dt,
+        )
+    except Exception as exc:  # noqa: BLE001 -- classified, never silently swallowed
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "ENFORCEMENT_EVALUATION_FAILED",
+                         f"{type(exc).__name__}: {exc}", reconciliation=reconciliation)
+
+    enforcement_dict = enforcement_decision.to_dict()
+    if enforcement_decision.overall_verdict == "BLOCK":
+        return _blocked(pseudo_spec, "PORTFOLIO_EXPOSURE_ENFORCEMENT", "PORTFOLIO_EXPOSURE_LIMIT_BREACHED",
+                         enforcement_dict, reconciliation=reconciliation, portfolio_enforcement=enforcement_dict)
+
+    # --- O7 (.381) cost estimate -- INFORMATIONAL ONLY, never blocks.
+    cost_estimate: dict[str, Any] | None = None
+    if cost_model_config is not None and cost_model_leg_quotes is not None:
+        cost81 = _load_options_cost_model_module()
+        legs_for_cost = [
+            {"occ_symbol": leg["contract"]["occ_symbol"], "side": leg["side"]}
+            for leg in validated["structure"]["legs"]
+        ]
+        try:
+            cost_estimate = cost81.estimate_round_trip_cost(
+                legs_for_cost, cost_model_leg_quotes, qty=validated["qty"], config=cost_model_config,
+            )
+        except Exception as exc:  # noqa: BLE001 -- informational only; see module docstring §7
+            cost_estimate = {"status": "COST_ESTIMATE_UNAVAILABLE", "error": f"{type(exc).__name__}: {exc}"}
+
+    audit_extra = {"reconciliation": reconciliation, "portfolio_enforcement": enforcement_dict,
+                    "cost_estimate": cost_estimate, "underlying_symbol": underlying_symbol}
+
+    blocked, record = _options_authorize(
+        execution_spec, environment=environment, auth_config=auth_config, auth_claims_dir=auth_claims_dir,
+        now_dt=now_dt,
+    )
+    if blocked is not None:
+        stage, reason, detail = blocked
+        return _blocked(pseudo_spec, stage, reason, detail, **audit_extra)
+
+    if not attempt_submission:
+        # Construction-only preview -- stops HERE, before `.378.
+        # authorized_order_request()` (hence `.379`'s claim store and this
+        # module's own client_order_id claim store) is ever touched. See
+        # module docstring §7 -- the MEXC lesson, not the Alpaca one.
+        result = _base_result(pseudo_spec)
+        result["authorization_id"] = record.get("authorization_id")
+        result["status"] = "READY_FOR_SUBMISSION"
+        result["stage"] = "CONSTRUCTION_ONLY"
+        result.update(audit_extra)
+        return result
+
+    tail = _options_claim_and_submit(
+        record, execution_spec, environment=environment, auth_config=auth_config, auth_claims_dir=auth_claims_dir,
+        supervisor_claims_dir=supervisor_claims_dir, alpaca_client=alpaca_client, now_dt=now_dt,
+    )
+    if tail["blocked"]:
+        extra = {k: v for k, v in tail.items() if k not in ("blocked", "stage", "reason", "detail")}
+        return _blocked(pseudo_spec, tail["stage"], tail["reason"], tail["detail"],
+                         authorization_id=record.get("authorization_id"), **extra, **audit_extra)
+
+    result = _base_result(pseudo_spec)
+    result["authorization_id"] = record.get("authorization_id")
+    result["order_spec"] = tail["order_spec"]
+    result["order_spec_digest"] = tail["order_spec_digest"]
+    result.update(audit_extra)
+    result["submission_result"] = tail["submission_result"]
+    result["status"] = tail["submission_result"]["status"]
+    result["stage"] = "SUBMITTED"
+    return result
+
+
+def supervise_options_exit_execution(
+    position: dict[str, Any],
+    *,
+    entry_net_price: Any,
+    leg_quotes: dict[str, Any],
+    as_of_date: date,
+    closing_execution_spec: dict[str, Any],
+    earnings_calendar_state: Any = None,
+    exit_config: dict[str, Any] | None = None,
+    environment: str = "PAPER",
+    auth_config: dict[str, Any] | None = None,
+    auth_claims_dir: Path | None = None,
+    supervisor_claims_dir: Path | None = None,
+    attempt_submission: bool = False,
+    alpaca_client: Any = None,
+    supervisor_config: dict[str, Any] | None = None,
+    now_dt: datetime | None = None,
+) -> dict[str, Any]:
+    """The single entry point for evaluating AND, when warranted, executing
+    an O6 (`.380.evaluate_exit()`) CLOSE decision on an options vertical
+    spread -- see module docstring §7. UNLIKE every other entry point in
+    this file, this function reads the Supervisor's OWN kill switch
+    (static AND dynamic) but NEVER uses it to produce a BLOCKED result --
+    it reads it ONLY to compute the `kill_switch_engaged` argument it
+    hands to `.380.evaluate_exit()`, whose inversion (True FORCES an
+    emergency close) then does the actual work. This is the literal
+    mechanism behind "the exit path must still succeed when the
+    Supervisor's own kill switch is engaged": when `cfg["kill_switch"]`
+    or the static switch is on, O6 is told to force a close and (being
+    priority-ordered with KILL_SWITCH first, evaluated unconditionally)
+    always returns `action="CLOSE"`, which this function then executes
+    with NO further kill-switch check anywhere below this point --
+    closing is always allowed once O6 has decided CLOSE, full stop.
+
+    `position`/`entry_net_price`/`leg_quotes`/`as_of_date`/
+    `earnings_calendar_state`/`exit_config` are `.380.evaluate_exit()`'s
+    own parameters, passed straight through (this function never second-
+    guesses O6's own decision logic -- it only supplies the one input
+    that is genuinely THIS module's to supply: the Supervisor's own
+    kill-switch state). `closing_execution_spec` is the actual O4-shaped
+    vertical-spread spec for the CLOSING order (both legs' `direction`
+    must be `CLOSE_LONG`/`CLOSE_SHORT`) -- a separately caller-supplied
+    spec, never derived from O6's decision (O6 has no limit_price/qty/
+    time_in_force/client_order_id fields to derive one from; that remains
+    the caller's own pricing/sizing decision, exactly like O4's own
+    adapter trusts `limit_price` structurally, never economically). When
+    O6 decides HOLD, this function stops there and NEVER even looks at
+    `closing_execution_spec` -- no authorization, no claim, nothing.
+
+    Sequence: compute `kill_switch_engaged` from the Supervisor's own
+    static+dynamic kill switch -> `.380.evaluate_exit()` -> if HOLD, stop
+    -> environment gate -> `.376.validate_vertical_spec()` (fresh) ->
+    closing-direction check -> `.378.authorize()` -> (only if
+    `attempt_submission=True`) `.378.authorized_order_request()` (claim +
+    construct) -> this module's own client_order_id claim -> `.376.
+    submit()`. No O4B freeze gate and no O8 portfolio-exposure gate
+    either -- both are scoped by Martin's decision to NEW (open)
+    decisions only; reducing/closing existing risk is never blocked by
+    either."""
+    auth_claims_dir = auth_claims_dir or DEFAULT_OPTIONS_AUTH_CLAIMS_DIR
+    supervisor_claims_dir = supervisor_claims_dir or DEFAULT_OPTIONS_CLIENT_ORDER_ID_CLAIMS_DIR
+
+    cfg = load_supervisor_config(supervisor_config)
+    forced_close = bool(cfg["kill_switch"]) or static_kill_switch_engaged()
+
+    exit80 = _load_options_exit_engine_module()
+    try:
+        exit_decision = exit80.evaluate_exit(
+            position, entry_net_price=entry_net_price, leg_quotes=leg_quotes, as_of_date=as_of_date,
+            kill_switch_engaged=forced_close, earnings_calendar_state=earnings_calendar_state,
+            config=exit_config,
+        )
+    except RuntimeError as exc:
+        return _blocked(None, "EXIT_DECISION", "EXIT_EVALUATION_FAILED", str(exc))
+
+    if exit_decision["action"] != "CLOSE":
+        # HOLD -- nothing to execute. Deliberately never even inspects
+        # `closing_execution_spec` in this branch: no authorization, no
+        # claim, nothing durable touched for a position that isn't
+        # closing.
+        result = _base_result(None)
+        result["status"] = "HOLD"
+        result["stage"] = "EXIT_DECISION"
+        result["exit_decision"] = exit_decision
+        return result
+
+    audit_extra = {"exit_decision": exit_decision}
+
+    if environment not in ALLOWED_ENVIRONMENTS:
+        reason = "LIVE_EXECUTION_NOT_SUPPORTED_FOR_OPTIONS" if environment == "LIVE" else "UNSUPPORTED_ENVIRONMENT"
+        return _blocked(None, "ENVIRONMENT", reason, environment, **audit_extra)
+
+    adapter76 = _load_options_adapter_module()
+    try:
+        validated = adapter76.validate_vertical_spec(closing_execution_spec)
+    except RuntimeError as exc:
+        return _blocked(None, "STRUCTURE_VALIDATION", "STRUCTURE_VALIDATION_FAILED", str(exc), **audit_extra)
+
+    if not all(d in adapter76.CLOSING_DIRECTIONS for d in validated["directions"]):
+        return _blocked(None, "EXIT_DECISION", "CLOSING_SPEC_MUST_BE_ALL_CLOSE_DIRECTIONS",
+                         validated["directions"], **audit_extra)
+
+    underlying_symbol = validated["structure"]["underlying_symbol"]
+    client_order_id = validated["client_order_id"]
+    pseudo_spec = _options_pseudo_spec(underlying_symbol, client_order_id, direction="CLOSE")
+    audit_extra["underlying_symbol"] = underlying_symbol
+
+    blocked, record = _options_authorize(
+        closing_execution_spec, environment=environment, auth_config=auth_config, auth_claims_dir=auth_claims_dir,
+        now_dt=now_dt,
+    )
+    if blocked is not None:
+        stage, reason, detail = blocked
+        return _blocked(pseudo_spec, stage, reason, detail, **audit_extra)
+
+    if not attempt_submission:
+        # Construction-only preview -- same MEXC-precedent discipline as
+        # supervise_options_execution(): stops before .379/this module's
+        # own client_order_id claim store is ever touched.
+        result = _base_result(pseudo_spec)
+        result["authorization_id"] = record.get("authorization_id")
+        result["status"] = "READY_FOR_SUBMISSION"
+        result["stage"] = "CONSTRUCTION_ONLY"
+        result.update(audit_extra)
+        return result
+
+    tail = _options_claim_and_submit(
+        record, closing_execution_spec, environment=environment, auth_config=auth_config,
+        auth_claims_dir=auth_claims_dir, supervisor_claims_dir=supervisor_claims_dir,
+        alpaca_client=alpaca_client, now_dt=now_dt,
+    )
+    if tail["blocked"]:
+        extra = {k: v for k, v in tail.items() if k not in ("blocked", "stage", "reason", "detail")}
+        return _blocked(pseudo_spec, tail["stage"], tail["reason"], tail["detail"],
+                         authorization_id=record.get("authorization_id"), **extra, **audit_extra)
+
+    result = _base_result(pseudo_spec)
+    result["authorization_id"] = record.get("authorization_id")
+    result["order_spec"] = tail["order_spec"]
+    result["order_spec_digest"] = tail["order_spec_digest"]
+    result.update(audit_extra)
+    result["submission_result"] = tail["submission_result"]
+    result["status"] = tail["submission_result"]["status"]
+    result["stage"] = "SUBMITTED"
+    return result
+
+
+def supervise_options_reconciliation_pass(
+    expected_options_positions: list[dict[str, Any]],
+    *,
+    reconciliation_client: Any = None,
+    lookback_days: int | None = None,
+) -> dict[str, Any]:
+    """Crash-recovery / ongoing-reconciliation entry point for options
+    positions -- mirrors `supervise_mexc_reconciliation_pass()`'s shape,
+    calling O4B's `.377.reconcile()` instead of MEXC's `.30`. Deliberately
+    NOT gated by either kill switch (module docstring §5/§7) -- pure
+    observation/recording of what already happened, never a new order.
+
+    Unlike the MEXC version, there is no options-specific intent ledger
+    to recover an individual intent's lifecycle state from (module
+    docstring §7's crash-recovery design decision: none was built, none
+    is needed) -- this function's only job is to surface `.377`'s own
+    freeze/mismatch findings directly, for a caller (ops, or the next
+    `supervise_options_execution()` call, which already re-runs this same
+    check as its own hard gate) to act on. Safe to call any number of
+    times: `.377` is stateless and makes no state-mutating call."""
+    if reconciliation_client is None:
+        return {"status": "BLOCKED", "reason": "MISSING_RECONCILIATION_CLIENT"}
+    if lookback_days is None:
+        return {"status": "BLOCKED", "reason": "MISSING_LOOKBACK_DAYS"}
+
+    recon77 = _load_options_reconciliation_module()
+    try:
+        reconciliation = recon77.reconcile(
+            expected_options_positions, reconciliation_client, lookback_days=lookback_days,
+        )
+    except RuntimeError as exc:
+        return {"status": "BLOCKED", "reason": "RECONCILIATION_FAILED", "detail": str(exc)}
+
+    return {
+        "status": "ESCALATED" if reconciliation["requires_human_attention"] else "RECONCILED",
+        "reconciliation": reconciliation,
+    }
+
+
 # --------------------------------------------------------------------- #
 # Disclosure list -- every function in this module capable of reaching a
 # real network call (indirectly, through an injected client/exchange
@@ -1424,4 +2201,7 @@ NETWORK_CAPABLE_FUNCTIONS = frozenset({
     "supervise_alpaca_equity_execution",
     "supervise_mexc_futures_execution",
     "supervise_mexc_reconciliation_pass",
+    "supervise_options_execution",
+    "supervise_options_exit_execution",
+    "supervise_options_reconciliation_pass",
 })

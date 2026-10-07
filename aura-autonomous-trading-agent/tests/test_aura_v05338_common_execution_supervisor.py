@@ -433,10 +433,15 @@ def test_source_kind_confers_no_execution_authority(tmp_path) -> None:
 
 
 def test_network_capable_functions_disclosure_is_accurate() -> None:
-    expect("8: NETWORK_CAPABLE_FUNCTIONS names exactly the three functions that accept an injected client/exchange",
+    # Updated 2026-10-07 (O9): three options entry points added, each
+    # accepting an injected reconciliation_client/alpaca_client -- see
+    # aura_v05338_common_execution_supervisor.py module docstring §7.
+    expect("8: NETWORK_CAPABLE_FUNCTIONS names exactly the six functions that accept an injected client/exchange",
            SUP.NETWORK_CAPABLE_FUNCTIONS == frozenset({
                "supervise_alpaca_equity_execution", "supervise_mexc_futures_execution",
                "supervise_mexc_reconciliation_pass",
+               "supervise_options_execution", "supervise_options_exit_execution",
+               "supervise_options_reconciliation_pass",
            }))
     for fn_name in SUP.NETWORK_CAPABLE_FUNCTIONS:
         expect(f"8: {fn_name} actually exists on the module", hasattr(SUP, fn_name))
