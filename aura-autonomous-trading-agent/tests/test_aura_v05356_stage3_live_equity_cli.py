@@ -693,7 +693,7 @@ def test_run_live_dry_run_cycle_uses_live_evidence_decide_kwargs_not_frozen(monk
     assert captured["decide_kwargs"]["short_technical_weight"] == 1.0
     assert captured["decide_kwargs"]["sentiment_weight"] == 1.0
     assert captured["decide_kwargs"]["wave_weight"] == 1.0
-    assert captured["decide_kwargs"]["sector_rotation_weight"] == 0.0
+    assert captured["decide_kwargs"]["sector_rotation_weight"] == 0.1
     assert result["decide_kwargs_source"] == "aura_v05362_live_evidence_orchestrator.LIVE_EVIDENCE_DECIDE_KWARGS"
     # .054's own frozen constant is completely untouched by this change
     assert SIGSRC.FROZEN_DECIDE_KWARGS["technical_weight"] == 0.0

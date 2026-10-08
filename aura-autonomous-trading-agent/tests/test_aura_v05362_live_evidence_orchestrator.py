@@ -232,7 +232,7 @@ def test_live_evidence_decide_kwargs_matches_confirmed_decision():
     assert kw["wave_weight"] == 1.0
     assert kw["technical_weight"] == 1.0
     assert kw["short_technical_weight"] == 1.0
-    assert kw["sector_rotation_weight"] == 0.0  # compute + log only
+    assert kw["sector_rotation_weight"] == 0.1  # live-influencing, 2026-10-08
     # generic thresholds reused verbatim from .054's already-approved frozen record
     assert kw["decision_threshold"] == 0.1
     assert kw["ai_penalty_per_concern"] == 0.2
