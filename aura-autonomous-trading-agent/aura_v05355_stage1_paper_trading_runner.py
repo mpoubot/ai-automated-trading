@@ -552,18 +552,49 @@ def _compose_with_institutional_gates(
 ) -> Callable[[str, str, Any, Any], Any] | None:
     if institutional_config is None:
         return enforcement_check_fn
-    track_b_module = load_institutional_track_b_module()
     portfolio_module = load_institutional_portfolio_module()
     earnings_module = load_earnings_blackout_module()  # reuse .368's combine_enforcement_check_fns, same as _compose_with_earnings_blackout
 
-    track_b_check_fn = track_b_module.build_short_protective_check_fn(
-        borrow_feed=institutional_config.track_b_borrow_feed,
-        short_interest_feed=institutional_config.track_b_short_interest_feed,
-        bars_provider=institutional_config.track_b_bars_provider,
-        account_equity_lookup=account_equity_lookup,
-        entry_price_lookup=reference_price_fn,
-        config=institutional_config.track_b_config,
-    )
+    # Extension, 2026-10-09 (Martin, "PRODUCTION MANDATE -- OPTION 1
+    # ENFORCEMENT & ENTRY-POINT WIRING"): Track B's three short-protective
+    # gates (borrow-fee veto, squeeze-crowding veto, gap-tail-risk veto)
+    # require a REAL borrow-fee feed and a REAL short-interest feed.
+    # `institutional/track_b/borrow_data_feeds.py`'s own module docstring
+    # states plainly that no real implementation of either exists anywhere
+    # in this codebase yet -- only synthetic test fixtures, both flagged
+    # `IS_REAL_MARKET_DATA = False`. Rather than silently wiring a
+    # synthetic fixture into a live-capital entry point and presenting
+    # that as "real", this function now treats Track B's two data
+    # collaborators as genuinely OPTIONAL: if either is `None`, the
+    # short-protective check_fn is skipped entirely (never constructed,
+    # never silently no-op'd behind a fake "always allow" stand-in) and a
+    # loud, explicit warning is printed -- but the REAL, already-validated
+    # portfolio/Greeks/macro-bucket enforcement below is built and
+    # enforced exactly as before, completely unaffected by this skip.
+    # `track_b_module`/`track_b_check_fn` are only loaded/built in the
+    # branch that actually uses them, so an unavailable Track B module
+    # never blocks the real portfolio/Greeks gates from working.
+    track_b_check_fn = None
+    if institutional_config.track_b_borrow_feed is None or institutional_config.track_b_short_interest_feed is None:
+        print(
+            "[AURA INSTITUTIONAL CORE] WARNING: Track B short-protective gates "
+            "(borrow-fee / squeeze-crowding / gap-tail-risk) are INERT this cycle -- "
+            "track_b_borrow_feed and/or track_b_short_interest_feed is None (no real "
+            "borrow-fee or short-interest vendor feed is wired yet; see "
+            "institutional/track_b/borrow_data_feeds.py). Portfolio/Greeks/macro-bucket "
+            "enforcement below is UNAFFECTED and still enforces normally.",
+            file=sys.stderr,
+        )
+    else:
+        track_b_module = load_institutional_track_b_module()
+        track_b_check_fn = track_b_module.build_short_protective_check_fn(
+            borrow_feed=institutional_config.track_b_borrow_feed,
+            short_interest_feed=institutional_config.track_b_short_interest_feed,
+            bars_provider=institutional_config.track_b_bars_provider,
+            account_equity_lookup=account_equity_lookup,
+            entry_price_lookup=reference_price_fn,
+            config=institutional_config.track_b_config,
+        )
     portfolio_check_fn = portfolio_module.build_additional_portfolio_check_fn(
         snapshot_provider=snapshot_provider,
         greeks_config=institutional_config.greeks_config,
