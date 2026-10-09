@@ -34,38 +34,6 @@ from core.trade_logger import TradeLogger
 from notifier import TelegramNotifier
 from dashboard_server import DashboardServer
 
-# --- INSTITUTIONAL Track A wiring (2026-10-09) -------------------------
-# track_a/'s own modules (data_feeds.py, liquidity_regime_gate.py, etc.)
-# import each other as flat same-directory siblings -- that directory,
-# NOT mexc_bot/'s own root, must be on sys.path for `import entry_filters`
-# below to resolve its own internal imports. mexc_bot/'s root is already
-# on sys.path whenever this file is run directly (Python's own "script's
-# own directory" rule), so `from core import ...` above is unaffected.
-_TRACK_A_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "institutional", "track_a")
-if _TRACK_A_DIR not in sys.path:
-    sys.path.insert(0, _TRACK_A_DIR)
-
-import entry_filters as institutional_entry_filters          # noqa: E402
-from data_feeds import SyntheticFixtureDataFeeds              # noqa: E402
-from data_feeds import NativeMexcFundingProvider               # noqa: E402
-
-# Known, already-disclosed gap (see institutional/track_a/data_feeds.py and
-# this package's README): MEXC order-book depth, open interest, and
-# liquidation feeds do not exist anywhere in this codebase today -- only
-# funding rate does. `_TrackAFeedBundle` below wires the ONE real feed that
-# exists (funding, via `.mexc_native`) and leaves the other three as the
-# synthetic fixture until a real feed is built. This is not a silent
-# approximation: `SyntheticFixtureDataFeeds'` own `DATA_SOURCE_LABEL` makes
-# this visible in every verdict's evidence.
-class _TrackAFeedBundle:
-    def __init__(self, exchange):
-        self._synthetic = SyntheticFixtureDataFeeds()
-        self.order_book = self._synthetic.order_book
-        self.cross_exchange = self._synthetic.cross_exchange
-        self.open_interest = self._synthetic.open_interest
-        self.liquidations = self._synthetic.liquidations
-        self.funding = NativeMexcFundingProvider(exchange)      # the one REAL feed
-
 os.makedirs(cfg.LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -113,9 +81,6 @@ class LiveBot:
         self.dashboard = DashboardServer(self.trade_logger, bot_ref=self)
         self.dashboard.start()
         self._last_summary_date = None
-        self._track_a_feeds = _TrackAFeedBundle(self.exchange)
-        self._track_a_cooldown_state: dict = {}   # caller-owned liquidation-cascade cooldown state, per entry_filters.py's own contract
-        self._universe_bars_cache: dict = {}      # symbol -> most-recently-fetched OHLCV, for the macro-regime breadth check
 
     # -- account state -------------------------------------------------
     def _settle_pnl(self, pnl: float) -> float:
@@ -216,7 +181,6 @@ class LiveBot:
         if df.empty or len(df) < cfg.CANDLES_LOOKBACK * 0.8:
             return
         df = strat.add_indicators(df)
-        self._universe_bars_cache[symbol] = df   # <-- NEW: feeds the macro-regime breadth check for every symbol's evaluation this cycle and beyond
 
         # -- manage existing position on this symbol --
         if symbol in self.open_positions:
@@ -239,26 +203,6 @@ class LiveBot:
         plan = calc_position_plan(price, sig["atr"], sig["signal"], equity)
         if plan is None or plan.position_size_usdt <= 0:
             return
-
-        # --- INSTITUTIONAL Track A entry-filter gate (2026-10-09) -------
-        # Inserted HERE, not right after evaluate_signal -- see this
-        # document's correction note at the top: planned_notional_usd is
-        # not known until calc_position_plan() has already run.
-        track_a_verdict = institutional_entry_filters.evaluate_entry_filters(
-            df, self._universe_bars_cache, symbol, sig["signal"],
-            planned_notional_usd=plan.position_size_usdt,
-            order_book=self._track_a_feeds.order_book,
-            cross_exchange=self._track_a_feeds.cross_exchange,
-            funding=self._track_a_feeds.funding,
-            open_interest=self._track_a_feeds.open_interest,
-            liquidations=self._track_a_feeds.liquidations,
-            now=datetime.now(timezone.utc),
-            cooldown_state=self._track_a_cooldown_state,
-        )
-        if not track_a_verdict.allowed:
-            log.info(f"TRACK_A_BLOCKED {symbol}: {track_a_verdict.reasons}")
-            return
-        # -----------------------------------------------------------------
 
         log.info(f"SIGNAL: {symbol} {sig['signal']} @ {price:.6f} "
                  f"(reason: {sig['reason']}, leverage={plan.leverage}x, "

@@ -25,22 +25,6 @@ from core import strategy as strat
 from core.risk_manager import calc_position_plan, CircuitBreaker
 from core import trade_metrics
 
-# --- INSTITUTIONAL Track A wiring (2026-10-09) -- same sys.path reasoning as live_bot.py ---
-import sys
-_TRACK_A_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "institutional", "track_a")
-if _TRACK_A_DIR not in sys.path:
-    sys.path.insert(0, _TRACK_A_DIR)
-import entry_filters as institutional_entry_filters   # noqa: E402
-from data_feeds import SyntheticFixtureDataFeeds        # noqa: E402
-_TRACK_A_FEEDS = SyntheticFixtureDataFeeds()
-# backtester.py has no live exchange handle at indicator-build time in the
-# same way live_bot.py does, and funding history for an arbitrary
-# historical window is a separate fetch this module does not currently
-# make (see `_funding_rate_at()` below, which already falls back to a
-# constant) -- so this backtest wiring uses the full synthetic fixture for
-# ALL four Track A data feeds, not just three. Disclosed, not silent:
-# every verdict's evidence carries `DATA_SOURCE_LABEL="SYNTHETIC_FIXTURE"`.
-
 
 class Trade:
     def __init__(self, symbol, side, entry_time, entry_price, stop_price,
@@ -99,9 +83,7 @@ def _funding_rate_at(funding_df, ts):
 
 def simulate_symbol(df: pd.DataFrame, symbol: str, equity_tracker: dict,
                      breaker: CircuitBreaker, trade_log: list, funding_df=None,
-                     entry_mode: dict = None,
-                     universe_bars: dict | None = None,              # NEW
-                     track_a_cooldown_state: dict | None = None):    # NEW
+                     entry_mode: dict = None):
     """Walk forward candle-by-candle for one symbol, opening/managing at most
     one position at a time for that symbol (simplification: cross-symbol
     concurrency cap is enforced by the caller via equity_tracker['open_count']).
@@ -137,8 +119,6 @@ def simulate_symbol(df: pd.DataFrame, symbol: str, equity_tracker: dict,
 
     open_trade = None
     last_funding_ts = None
-    universe_bars = universe_bars if universe_bars is not None else {}
-    track_a_cooldown_state = track_a_cooldown_state if track_a_cooldown_state is not None else {}
 
     for i in range(len(df)):
         if i < max(cfg.EMA_SLOW, cfg.BREAKOUT_LOOKBACK) + 5:
@@ -262,23 +242,6 @@ def simulate_symbol(df: pd.DataFrame, symbol: str, equity_tracker: dict,
                 plan = calc_position_plan(price, sig["atr"], sig["signal"], equity_tracker["equity"])
                 if plan is None or plan.position_size_usdt <= 0:
                     continue
-
-                # --- INSTITUTIONAL Track A entry-filter gate (2026-10-09) ---
-                track_a_verdict = institutional_entry_filters.evaluate_entry_filters(
-                    window, universe_bars, symbol, sig["signal"],
-                    planned_notional_usd=plan.position_size_usdt,
-                    order_book=_TRACK_A_FEEDS.order_book,
-                    cross_exchange=_TRACK_A_FEEDS.cross_exchange,
-                    funding=_TRACK_A_FEEDS.funding,
-                    open_interest=_TRACK_A_FEEDS.open_interest,
-                    liquidations=_TRACK_A_FEEDS.liquidations,
-                    now=row["timestamp"].to_pydatetime(),
-                    cooldown_state=track_a_cooldown_state,
-                )
-                if not track_a_verdict.allowed:
-                    continue
-                # --------------------------------------------------------------
-
                 open_trade = Trade(symbol, sig["signal"], row["timestamp"], price,
                                     plan.stop_price, plan.quantity, plan.leverage,
                                     plan.risk_amount_usdt)
@@ -301,24 +264,15 @@ def run_backtest(symbols: list[str], days: int):
     equity_tracker = {"equity": cfg.BACKTEST_STARTING_EQUITY, "open_count": 0}
     breaker = CircuitBreaker(cfg.BACKTEST_STARTING_EQUITY)
     trade_log = []
-    track_a_cooldown_state: dict = {}   # shared across the whole run, one dict per backtest, matching the live bot's one-dict-per-process convention
 
-    # --- NEW: fetch pass (was previously fetch-then-simulate per symbol) ---
-    universe_bars: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
         print(f"Fetching {symbol} ({cfg.TIMEFRAME}, {days}d)...")
         df = dfetch.fetch_ohlcv_range(exchange, symbol, cfg.TIMEFRAME, start_ms, end_ms)
         if df.empty or len(df) < 250:
             print(f"  skipped — insufficient data ({len(df)} candles)")
             continue
-        universe_bars[symbol] = df
+        simulate_symbol(df, symbol, equity_tracker, breaker, trade_log)
         time.sleep(exchange.rateLimit / 1000)
-
-    # --- simulate pass ---
-    for symbol, df in universe_bars.items():
-        simulate_symbol(df, symbol, equity_tracker, breaker, trade_log,
-                         universe_bars=universe_bars,
-                         track_a_cooldown_state=track_a_cooldown_state)
 
     log_df = pd.DataFrame(trade_log)
     print_report(log_df, equity_tracker["equity"])
