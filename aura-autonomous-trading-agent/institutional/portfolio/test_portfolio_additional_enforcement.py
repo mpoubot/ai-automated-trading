@@ -120,7 +120,7 @@ def test_macro_bucket_dimension_short_leg_offsets_net_but_not_gross():
 
 def test_macro_bucket_dimension_not_configured_then_pass_then_block():
     # BTC long $5000 / $10000 equity -> long_stacking_ratio = 0.5, well
-    # over the hard 0.15 stacking threshold -- so the stacking verdicts
+    # over the hard 0.20 stacking threshold -- so the stacking verdicts
     # (always present, unconditionally, regardless of
     # max_bucket_exposure_ratio -- see module docstring) BLOCK on the
     # LONG side in every one of the three cases below, independent of
@@ -180,9 +180,18 @@ def test_macro_bucket_exposure_ratio_uses_gross_not_net():
 
 
 def test_macro_bucket_same_direction_stacking_hard_threshold():
-    assert macro_buckets.SAME_DIRECTION_STACKING_HARD_THRESHOLD == 0.15
+    # UPDATED 2026-10-09 (Martin's explicit directive, calibration review):
+    # production threshold moved 0.15 -> 0.20 -- see macro_buckets.py's own
+    # inline justification at SAME_DIRECTION_STACKING_HARD_THRESHOLD. The
+    # PASS fixture below (0.14) needed no change -- it was already under
+    # 0.15 and is still comfortably under 0.20. The BLOCK fixture below was
+    # recalibrated from 0.16 (over the OLD 0.15 floor, but NOT over the NEW
+    # 0.20 floor -- this exact case was what made this test fail after the
+    # threshold change) to 0.25, restoring a clear margin above the new
+    # 0.20 floor rather than sitting on or near the new boundary.
+    assert macro_buckets.SAME_DIRECTION_STACKING_HARD_THRESHOLD == 0.20
 
-    # $1400 long BTC / $10000 equity = 0.14 -> under the 0.15 hard floor.
+    # $1400 long BTC / $10000 equity = 0.14 -> under the 0.20 hard floor.
     under = macro_buckets.MacroBucketConfig(bucket_membership={"RISK_SENTIMENT_BETA": {"BTC/USDT:USDT": 1.0}})
     snapshot = make_snapshot([make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=1400.0)])
     result = macro_buckets.compute_bucket_exposure(snapshot, under, account_equity_usd=10000.0)
@@ -191,13 +200,13 @@ def test_macro_bucket_same_direction_stacking_hard_threshold():
     long_stack = next(v for v in verdicts if v.dimension == "macro_bucket_same_direction_stacking" and v.evidence["direction"] == "LONG")
     assert long_stack.verdict == PASS
 
-    # $1600 long BTC / $10000 equity = 0.16 -> over the 0.15 hard floor.
-    over_snapshot = make_snapshot([make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=1600.0)])
+    # $2500 long BTC / $10000 equity = 0.25 -> over the 0.20 hard floor.
+    over_snapshot = make_snapshot([make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=2500.0)])
     verdicts = macro_buckets.evaluate_macro_bucket_dimension(snapshot=over_snapshot, config=under, account_equity_usd=10000.0)
     long_stack = next(v for v in verdicts if v.dimension == "macro_bucket_same_direction_stacking" and v.evidence["direction"] == "LONG")
     assert long_stack.verdict == BLOCK
     assert long_stack.reason == "LIMIT_BREACHED"
-    assert long_stack.evidence["threshold"] == 0.15
+    assert long_stack.evidence["threshold"] == 0.20
 
 
 def test_macro_bucket_stacking_is_per_direction_not_net():
@@ -221,12 +230,15 @@ def test_macro_bucket_stacking_is_per_direction_not_net():
 
 
 def test_evaluate_stacking_pretrade_direction_blocks_new_long_when_bucket_already_stacked():
-    # Existing book already breaches the 0.15 LONG stacking floor for
+    # Existing book already breaches the 0.20 LONG stacking floor for
     # RISK_SENTIMENT_BETA -- a NEW candidate OPEN_LONG order in ANY
     # symbol belonging to that bucket must be hard-blocked, even a tiny
     # one, because this check reflects the bucket's CURRENT state, not a
     # projection of the new order's own size.
-    positions = [make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=2000.0)]  # 0.20 > 0.15
+    # UPDATED 2026-10-09: notional recalibrated from $2000 (0.20 -- over
+    # the OLD 0.15 floor, but no longer over the NEW 0.20 floor since the
+    # threshold moved) to $2500, restoring a clear margin above 0.20.
+    positions = [make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=2500.0)]  # 0.25 > 0.20
     snapshot = make_snapshot(positions)
     config = macro_buckets.MacroBucketConfig(
         bucket_membership={"RISK_SENTIMENT_BETA": {"BTC/USDT:USDT": 1.0, "ETH/USDT:USDT": 1.0}},
@@ -835,12 +847,15 @@ def test_record_additional_portfolio_decision_uses_real_journal(tmp_path):
 
 
 def test_build_additional_portfolio_check_fn_blocks_on_macro_stacking_breach():
-    # Book already over the 0.15 LONG stacking floor for RISK_SENTIMENT_BETA
-    # ($2000 / $10000 = 0.20). A candidate OPEN_LONG in ETH (same bucket)
+    # Book already over the 0.20 LONG stacking floor for RISK_SENTIMENT_BETA
+    # ($2500 / $10000 = 0.25). A candidate OPEN_LONG in ETH (same bucket)
     # must be blocked by the stacking gate even though it carries no
     # option_detail at all -- proving this gate is not options-specific
     # and does not depend on the Greeks half of this check_fn.
-    positions = [make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=2000.0)]
+    # UPDATED 2026-10-09: notional recalibrated from $2000 (0.20 -- over
+    # the OLD 0.15 floor, but no longer over the NEW 0.20 floor) to $2500,
+    # restoring a clear margin above the new 0.20 floor.
+    positions = [make_position(venue="MEXC", symbol="BTC/USDT:USDT", notional_usd=2500.0)]
     snapshot = make_snapshot(positions)
     macro_config = macro_buckets.MacroBucketConfig(
         bucket_membership={"RISK_SENTIMENT_BETA": {"BTC/USDT:USDT": 1.0, "ETH/USDT:USDT": 1.0}},

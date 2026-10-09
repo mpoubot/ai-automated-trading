@@ -258,7 +258,24 @@ TRACK_A_CRYPTO_PAIRS: tuple[str, ...] = (
 # backward-compatible storage/display only) so this safety check can
 # never be silently disabled by a config that leaves that field at its
 # default `None`. See module docstring.
-SAME_DIRECTION_STACKING_HARD_THRESHOLD: float = 0.15
+#
+# UPDATED 2026-10-09 (Martin's explicit directive, calibration review):
+# 0.15 -> 0.20, per the real 5-year/39-symbol stacking-ratio sweep in
+# calibrate_institutional_limits.py's section_1_stacking_ratio_sweep,
+# including the max-drawdown extension added the same day. At 0.20 the
+# real-trade-data replay shows higher total_return_pct (+1.07pp),
+# profit_factor (+0.0049), and sharpe_like (+0.00163) than 0.15, for a
+# max_drawdown_pct cost of +0.039pp (3.1436% vs 3.1044%) with IDENTICAL
+# max_drawdown_duration_days (139 vs 139) -- both threshold's deepest
+# drawdown is the same real 2022-04-05 -> 2022-05-09 window. Thresholds
+# looser than ~0.20 (0.30, 0.50/ungated) fall into a materially worse,
+# longer real drawdown regime (3.5716%, 226 days, 2022-04-05 ->
+# 2022-07-14), so 0.20 keeps the gate's real tail-risk protection while
+# capturing nearly all the available return/Sharpe improvement over the
+# prior 0.15. Caveat carried forward honestly: this is one 5-year
+# historical path with one realized worst-case window, not a guarantee
+# about a future drawdown's depth or timing.
+SAME_DIRECTION_STACKING_HARD_THRESHOLD: float = 0.20
 
 PROPOSED_MACRO_BUCKET_CONFIG = MacroBucketConfig(
     bucket_membership={

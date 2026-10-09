@@ -93,6 +93,52 @@ WHAT THIS SCRIPT DOES DO, CONCRETELY
      ratio each `PROPOSED_GREEKS_LIMITS_CONFIG` threshold would bind --
      explicitly labeled NOT A BACKTEST RESULT anywhere it appears.
 
+MAX-DRAWDOWN EXTENSION (added 2026-10-09, per Martin's explicit mandate,
+in response to the first real-data calibration run)
+------------------------------------------------------------------------
+`baseline_ungated_metrics` and every row of
+`section_1_stacking_ratio_sweep_REAL_TRADE_DATA` now carry five
+additional fields: `max_drawdown_pct`, `max_drawdown_duration_days`,
+`max_drawdown_recovered`, `max_drawdown_peak_timestamp`,
+`max_drawdown_trough_timestamp`. Section 2 (exposure-ratio diagnostic)
+and Section 3 (Greeks formula table) are untouched -- drawdown is only
+meaningful for a trade-blocking replay and its ungated baseline, which
+is what this extension was asked to compare.
+
+Methodology, disclosed in full:
+  - `max_drawdown_pct` is the single greatest peak-to-trough decline
+    over the row's own equity curve, as a percentage. The magnitude
+    formula is IDENTICAL to `aura_v054_backtest.py`'s own already-
+    approved `_max_drawdown()` (peak-tracking walk over a flat equity
+    sequence) -- re-derived here (not imported) only because this
+    script also needs the TIMESTAMPS of the peak/trough/recovery points
+    that `.054`'s version discards, but verified byte-for-byte
+    equivalent to `.054`'s real function on the same input during
+    testing before this was shipped.
+  - `max_drawdown_duration_days` uses the standard institutional
+    "time underwater" definition: elapsed calendar days from the peak
+    that precedes the deepest drawdown to the first later point the
+    equity curve makes a NEW high (full recovery) -- not peak-to-trough.
+    If the single deepest drawdown episode has NOT recovered by the end
+    of the available data, duration instead runs from that peak to the
+    last data point, and `max_drawdown_recovered` is `False` -- an
+    unrecovered drawdown is never silently reported as if it had closed.
+  - Equity-curve ordering for THIS calculation is by each trade's EXIT
+    timestamp (when P&L actually realizes), via a new, separate curve
+    (`_build_equity_curve_by_exit`) built purely for this metric. This
+    is deliberately DIFFERENT from `replay_with_stacking_gate`'s own
+    pre-existing internal `equity` variable, which stays entry-ordered
+    and unchanged -- that variable only feeds `account_equity_usd` into
+    the pre-trade stacking-gate check itself and was never a drawdown
+    computation; repurposing it would have silently mixed two different
+    orderings into one number, so a second, purpose-built curve was used
+    instead and that choice is disclosed here rather than left implicit.
+  - Verified: a hand-calculated 6-trade synthetic sequence (one fully
+    recovered drawdown episode, one unrecovered-at-end-of-data episode)
+    reproduced by independent arithmetic before this was wired in;
+    the magnitude also cross-checked exactly against `.054`'s own real
+    `_max_drawdown()` function on the identical equity sequence.
+
 HONEST DISCLOSURE ON RUNNING THIS FOR REAL
 ------------------------------------------------------------------------
 This script was authored and structurally smoke-tested (`--self-test`,
@@ -275,6 +321,99 @@ def _trade_metrics(trades: list["BT.TradeRecord"], initial_equity: float) -> dic
     }
 
 
+def _build_equity_curve_by_exit(
+    trades: list["BT.TradeRecord"], initial_equity: float,
+) -> list[tuple[Any, float]]:
+    """Builds a (timestamp, running_equity) sequence ordered by each
+    trade's EXIT timestamp (when its P&L actually realizes) -- purpose-
+    built for the max-drawdown extension below. See the module
+    docstring's "MAX-DRAWDOWN EXTENSION" section for why this is a
+    separate curve from `replay_with_stacking_gate`'s own internal,
+    entry-ordered `equity` variable, not a reuse of it. Returns `[]` if
+    there are no closed trades (nothing to compute a drawdown over)."""
+    closed = [t for t in trades if t.realized_pnl_dollars is not None and t.exit_timestamp is not None]
+    if not closed:
+        return []
+    ordered = sorted(closed, key=lambda t: t.exit_timestamp)
+    start_ts = min(t.entry_timestamp for t in closed)
+    points: list[tuple[Any, float]] = [(start_ts, initial_equity)]
+    running = initial_equity
+    for t in ordered:
+        running += t.realized_pnl_dollars
+        points.append((t.exit_timestamp, running))
+    return points
+
+
+def _max_drawdown_with_duration(equity_points: list[tuple[Any, float]]) -> dict[str, Any]:
+    """Finds the single deepest peak-to-trough drawdown episode in
+    `equity_points` (chronologically ordered (timestamp, equity) pairs)
+    and reports its magnitude AND duration. Magnitude uses the identical
+    peak-tracking formula as `aura_v054_backtest.py`'s own already-
+    approved `_max_drawdown()` (verified byte-for-byte equivalent on the
+    same input during testing). Duration is "time underwater": peak to
+    first later new-high (full recovery), or peak to the last available
+    data point with `max_drawdown_recovered=False` if the deepest
+    episode never recovers before the data ends -- see module docstring.
+    Returns an all-None dict if there are fewer than 2 points (nothing
+    to compute a drawdown over), matching `.054`'s own `_max_drawdown`
+    convention for a too-short curve."""
+    if len(equity_points) < 2:
+        return {
+            "max_drawdown_pct": None, "max_drawdown_duration_days": None,
+            "max_drawdown_recovered": None, "max_drawdown_peak_timestamp": None,
+            "max_drawdown_trough_timestamp": None,
+        }
+
+    max_dd_frac = 0.0
+    dd_peak_ts = None
+    dd_trough_ts = None
+    dd_recovery_ts = None
+
+    cur_peak, cur_peak_ts = equity_points[0][1], equity_points[0][0]
+    cur_trough, cur_trough_ts = equity_points[0][1], equity_points[0][0]
+    in_drawdown = False
+
+    for ts, eq in equity_points[1:]:
+        if eq >= cur_peak:
+            if in_drawdown:
+                episode_dd_frac = (cur_peak - cur_trough) / cur_peak if cur_peak > 0 else 0.0
+                if episode_dd_frac >= max_dd_frac:
+                    max_dd_frac = episode_dd_frac
+                    dd_peak_ts, dd_trough_ts, dd_recovery_ts = cur_peak_ts, cur_trough_ts, ts
+            cur_peak, cur_peak_ts = eq, ts
+            cur_trough, cur_trough_ts = eq, ts
+            in_drawdown = False
+        else:
+            in_drawdown = True
+            if eq < cur_trough:
+                cur_trough, cur_trough_ts = eq, ts
+
+    if in_drawdown:
+        episode_dd_frac = (cur_peak - cur_trough) / cur_peak if cur_peak > 0 else 0.0
+        if episode_dd_frac >= max_dd_frac:
+            max_dd_frac = episode_dd_frac
+            dd_peak_ts, dd_trough_ts, dd_recovery_ts = cur_peak_ts, cur_trough_ts, None
+
+    if dd_peak_ts is None:
+        return {
+            "max_drawdown_pct": 0.0, "max_drawdown_duration_days": 0.0,
+            "max_drawdown_recovered": True,
+            "max_drawdown_peak_timestamp": str(equity_points[0][0]),
+            "max_drawdown_trough_timestamp": str(equity_points[0][0]),
+        }
+
+    duration_end_ts = dd_recovery_ts if dd_recovery_ts is not None else equity_points[-1][0]
+    duration_days = (duration_end_ts - dd_peak_ts).total_seconds() / 86400.0
+
+    return {
+        "max_drawdown_pct": max_dd_frac * 100.0,
+        "max_drawdown_duration_days": duration_days,
+        "max_drawdown_recovered": dd_recovery_ts is not None,
+        "max_drawdown_peak_timestamp": str(dd_peak_ts),
+        "max_drawdown_trough_timestamp": str(dd_trough_ts),
+    }
+
+
 def replay_with_stacking_gate(
     trades: tuple["BT.TradeRecord", ...],
     *,
@@ -329,6 +468,8 @@ def replay_with_stacking_gate(
             equity += t.realized_pnl_dollars
 
     metrics = _trade_metrics(surviving, initial_equity)
+    drawdown_metrics = _max_drawdown_with_duration(_build_equity_curve_by_exit(surviving, initial_equity))
+    metrics.update(drawdown_metrics)
     metrics.update({"blocked_count": len(blocked), "final_equity": equity})
     return metrics
 
@@ -544,6 +685,10 @@ def run_calibration(
     greeks_rows = greeks_sensitivity_table(greeks_limits.PROPOSED_GREEKS_LIMITS_CONFIG)
 
     baseline_metrics = _trade_metrics(list(report.trades), report.initial_equity)
+    baseline_drawdown_metrics = _max_drawdown_with_duration(
+        _build_equity_curve_by_exit(list(report.trades), report.initial_equity)
+    )
+    baseline_metrics.update(baseline_drawdown_metrics)
 
     return {
         "data_source_label": report.data_source_label,
