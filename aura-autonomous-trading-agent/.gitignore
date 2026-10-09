@@ -225,3 +225,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Patch-script backups (fix_staged_path_fallbacks / apply_institutional_hooks)
+*.bak-*

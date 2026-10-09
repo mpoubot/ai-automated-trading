@@ -67,3 +67,6 @@ aura-autonomous-trading-agent/requests-config.json
 aura-autonomous-trading-agent/scan_result.json
 aura-autonomous-trading-agent/scan_result_*.json
 aura-autonomous-trading-agent/stage3_live_test.json
+
+# Patch-script backups (fix_staged_path_fallbacks / apply_institutional_hooks)
+*.bak-*

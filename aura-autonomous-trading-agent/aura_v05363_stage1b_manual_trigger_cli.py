@@ -300,6 +300,7 @@ def run_manual_trigger_stage1b_cycle(
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
     decision_journal_path: Path | None = None,
+    institutional_config: Any | None = None,
 ) -> dict[str, Any]:
     """Mirrors `.356.run_live_dry_run_cycle`'s evidence-building and ATR
     sizing exactly (same helper functions, same sequencing), then calls
@@ -365,7 +366,21 @@ def run_manual_trigger_stage1b_cycle(
     `.55.run_stage1b_paper_cycle(journal_path=...)`. To disable journaling
     entirely for a given call, a caller would need to call `.55` directly
     with `journal_path=None` -- this module's own CLI (`main()`, below)
-    never does that; a bare `.363` manual-trigger run always journals."""
+    never does that; a bare `.363` manual-trigger run always journals.
+
+    Extension -- 2026-10-09 (Martin, "PRODUCTION MANDATE -- OPTION 1
+    ENFORCEMENT & ENTRY-POINT WIRING"): `institutional_config` is a new,
+    OPTIONAL keyword-only parameter, threaded straight through to `.55`'s
+    `run_stage1b_paper_cycle(institutional_config=...)` unchanged. `None`
+    (the default) reproduces this function's original behavior exactly --
+    no institutional Track B/portfolio/Greeks gating at all. This
+    module's own CLI (`main()`, below) only ever supplies a non-`None`
+    value when `--enable-institutional-gates` is passed, and even then
+    builds it with `track_b_borrow_feed`/`track_b_short_interest_feed`
+    explicitly `None` (Track B short-protective gates stay INERT -- no
+    real vendor feed exists yet, see `.55`'s own
+    `_compose_with_institutional_gates`); the real, validated portfolio/
+    Greeks/macro-bucket enforcement is what actually activates."""
     if not confirmed:
         raise Stage1BManualTriggerCliError(
             "SUBMISSION_NOT_CONFIRMED:this cycle will not run without explicit confirmation "
@@ -524,6 +539,7 @@ def run_manual_trigger_stage1b_cycle(
             now=now_dt,
             earnings_calendar_state=earnings_calendar_state,
             journal_path=journal_path,
+            institutional_config=institutional_config,
         )
 
     return {
@@ -559,6 +575,15 @@ def run_manual_trigger_stage1b_cycle(
             if limits is None else "caller-supplied .344.PortfolioLimits (see limits_applied below) -- Extension 2026-09-29"
         ),
         "limits_applied": limits.to_dict() if limits is not None else None,
+        "institutional_gates_enabled": institutional_config is not None,
+        "institutional_gates_note": (
+            "institutional_config was supplied -- .44 is composed with the real portfolio/Greeks/"
+            "macro-bucket check and, if track_b_borrow_feed/track_b_short_interest_feed were also "
+            "non-None, the Track B short-protective checks too (see .55's _compose_with_institutional_gates)."
+            if institutional_config is not None else
+            "institutional_config was not supplied (--enable-institutional-gates was not passed) -- "
+            "no institutional Track B/portfolio/Greeks gating this cycle, unchanged from pre-2026-10-09 behavior."
+        ),
         "equity_history_log_path": str(log_path),
         "equity_history_observation_count": len(equity_history),
         "equity_history_note": (
@@ -650,8 +675,48 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                          required=True,
                          help="REQUIRED. This run can submit a real order to your Alpaca PAPER account. There "
                               "is no way to pass this flag as false -- omit it to refuse to run at all.")
+    parser.add_argument("--enable-institutional-gates", action="store_true",
+                         help="Extension -- 2026-10-09 (Martin, 'PRODUCTION MANDATE -- OPTION 1 ENFORCEMENT & "
+                              "ENTRY-POINT WIRING'). Activates the real, calibrated .344/.344-portfolio Greeks/"
+                              "macro-bucket enforcement (SAME_DIRECTION_STACKING_HARD_THRESHOLD=0.20, "
+                              "PROPOSED_GREEKS_LIMITS_CONFIG) via .55's InstitutionalGatesConfig. Track B's "
+                              "short-protective gates (borrow-fee / squeeze-crowding / gap-tail-risk) stay "
+                              "explicitly INERT -- no real borrow-fee or short-interest vendor feed exists in "
+                              "this codebase yet (see institutional/track_b/borrow_data_feeds.py's module "
+                              "docstring). Fails closed before any client is built or any order is routed to "
+                              "the broker if the institutional gate modules cannot be loaded (e.g. AURA_CORE_DIR "
+                              "unreadable or missing a required core module file). Omit to reproduce this "
+                              "module's pre-2026-10-09 behavior exactly (no institutional gating at all).")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
+
+    # --- INSTITUTIONAL GATES preflight -- fail closed BEFORE any client is
+    # built or any order is routed to the broker (Martin's explicit
+    # directive). Only runs at all when --enable-institutional-gates was
+    # passed; a bare run is completely unaffected. ---
+    institutional_portfolio_module = None
+    institutional_macro_buckets_module = None
+    institutional_greeks_limits_module = None
+    if args.enable_institutional_gates:
+        try:
+            stage1_module_preflight = load_stage1_runner_module()  # also os.environ.setdefault("AURA_CORE_DIR", ...)
+            institutional_portfolio_module = stage1_module_preflight.load_institutional_portfolio_module()
+            stage1_module_preflight.load_institutional_track_b_module()  # import-only check; not used while inert
+            institutional_macro_buckets_module = _load_module("macro_buckets", "institutional/portfolio/macro_buckets.py")
+            institutional_greeks_limits_module = _load_module("greeks_limits", "institutional/portfolio/greeks_limits.py")
+        except Exception as exc:  # noqa: BLE001 -- fail-closed at the CLI boundary, never a raw traceback, before any broker contact
+            print(
+                f"FAIL-CLOSED: INSTITUTIONAL_GATES_PREFLIGHT_FAILED:{type(exc).__name__}:{exc} -- "
+                "--enable-institutional-gates was passed but the institutional gate modules could not be "
+                "loaded (commonly: AURA_CORE_DIR unreadable, or missing a required core module file). "
+                "Aborting before any client was built or any order was routed to the broker.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "[AURA INSTITUTIONAL CORE] Portfolio & Greeks gates ENABLED (Threshold: 0.20). "
+            "Equities Short-Side gates INERT (Missing live vendor feeds)."
+        )
 
     universe_mode_flags = [bool(args.requests_config), bool(args.scan_pinned_universe), bool(args.scan_full_universe)]
     if sum(universe_mode_flags) != 1:
@@ -700,6 +765,33 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
         universe_version = args.universe_version or signal_source_module.UNIVERSE_VERSION
 
+        # --- INSTITUTIONAL GATES config -- only built when the preflight
+        # above succeeded (args.enable_institutional_gates True and every
+        # institutional module loaded cleanly). track_b_borrow_feed/
+        # track_b_short_interest_feed are explicitly None: no real vendor
+        # feed exists yet (see .55's _compose_with_institutional_gates,
+        # which skips Track B's short-protective checks whenever either is
+        # None and prints its own explicit warning -- this is intentional,
+        # not an oversight). track_b_bars_provider is still wired to a
+        # REAL Alpaca daily-bars provider (not a stub) so the field is
+        # genuinely populated and ready for the day a real borrow-fee/
+        # short-interest feed is plugged in -- it is simply never invoked
+        # while Track B stays inert. --
+        institutional_config = None
+        if args.enable_institutional_gates:
+            bars_provider_module = _load_module("aura_v054_alpaca_bars_provider", "aura_v054_alpaca_bars_provider.py")
+            institutional_bars_provider = bars_provider_module.AlpacaEquityBarsProvider(api_key=api_key, secret_key=secret_key)
+            institutional_bars_provider.prefetch(tuple(r.symbol for r in symbol_requests))
+            institutional_config = stage1_module_preflight.InstitutionalGatesConfig(
+                track_b_borrow_feed=None,
+                track_b_short_interest_feed=None,
+                track_b_bars_provider=institutional_bars_provider.get_daily_bars,
+                track_b_config=None,
+                macro_config=institutional_macro_buckets_module.PROPOSED_MACRO_BUCKET_CONFIG,
+                greeks_config=institutional_greeks_limits_module.PROPOSED_GREEKS_LIMITS_CONFIG,
+            )
+            _ = institutional_portfolio_module  # loaded during preflight to prove it imports cleanly; .55 loads its own copy internally
+
         result = run_manual_trigger_stage1b_cycle(
             symbol_requests, confirmed=args.confirmed, bars_client=bars_client, alpaca_client=alpaca_client,
             max_new_orders_per_cycle=args.max_new_orders_per_cycle, lookback_bars=lookback_bars,
@@ -713,6 +805,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             earnings_calendar_api_key=earnings_calendar_api_key, earnings_state_dir=args.earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
             decision_journal_path=args.decision_journal_path,
+            institutional_config=institutional_config,
         )
     except Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)

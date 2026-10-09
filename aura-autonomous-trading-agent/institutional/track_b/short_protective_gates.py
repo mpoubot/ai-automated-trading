@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+AURA Track B -- Short-protective gates integration module.
+
+WHAT THIS MODULE IS
+------------------------------------------------------------------------
+Composes the three new, independent short-side risk gates in this
+package -- `borrow_fee_gate.build_borrow_fee_check_fn`,
+`squeeze_crowding_gate.build_squeeze_crowding_check_fn`, and
+`gap_tail_risk_gate.build_gap_tail_risk_check_fn` -- into ONE
+`enforcement_check_fn`-shaped closure, using the REAL, unmodified
+`combine_enforcement_check_fns` from `.368` (not reimplemented here; see
+import note below). The result is dropped into `.53.run_cycle` at
+exactly the same choke point `.368`'s own earnings-blackout gate and
+`.344`'s portfolio-exposure check already use.
+
+Import path note -- `aura_v05368_earnings_blackout_gate`
+------------------------------------------------------------------------
+In the real AURA repo, every numbered module (`.19`, `.35`, `.368`, ...)
+lives flat in one directory, so this import is simply:
+
+    from aura_v05368_earnings_blackout_gate import combine_enforcement_check_fns
+
+In THIS sandboxed environment, `.368` is staged read-only at
+`/mnt/user-data/uploads/AI automated trading/aura-autonomous-trading-agent/
+aura_v05368_earnings_blackout_gate.py`, outside this package's own
+directory. The import below tries the flat, real-repo-shaped import
+first; only if that fails (i.e. we are running locally, not inside the
+real repo) does it fall back to adding the staged directory to
+`sys.path` -- a LOCAL-TESTING-ONLY shim, never something the real repo
+needs, and never a copy/fork of `.368`'s own code.
+
+`ShortProtectiveGatesConfig` -- every threshold is a PROPOSED default
+------------------------------------------------------------------------
+Every numeric default below is "proposed institutional default, not yet
+validated for AURA" -- the same disclosure convention this project
+already uses for its own threshold constants (e.g. `.344`'s exposure
+limits). None of these numbers come from an AURA backtest or from
+Martin's own stated risk tolerance; they are reasonable starting points
+borrowed from common HTB-desk/risk-desk practice, stated here honestly
+so a reviewer does not mistake "has a default" for "has been validated".
+
+Real-repo wiring (quoted, NOT applied here)
+------------------------------------------------------------------------
+`.355.run_stage1a_dry_run()`'s own `_compose_with_earnings_blackout`-
+equivalent choke point composes `.44`'s portfolio-exposure check with
+`.368`'s earnings-blackout check via:
+
+    enforcement_check_fn = combine_enforcement_check_fns(
+        portfolio_enforcement_check_fn, earnings_blackout_check_fn,
+    )
+
+Wiring this package's short-protective gates in alongside those two,
+unmodified, is exactly one additional line at that same call site:
+
+    from short_protective_gates import build_short_protective_check_fn
+
+    short_gate_check_fn = build_short_protective_check_fn(
+        borrow_feed=real_borrow_feed,
+        short_interest_feed=real_short_interest_feed,
+        bars_provider=real_bars_provider,
+        account_equity_lookup=real_account_equity_lookup,
+        entry_price_lookup=real_entry_price_lookup,
+    )
+    enforcement_check_fn = combine_enforcement_check_fns(
+        portfolio_enforcement_check_fn, earnings_blackout_check_fn, short_gate_check_fn,
+    )
+
+No existing file is edited to make this true -- `combine_enforcement_
+check_fns` already accepts an arbitrary number of checks (`*fns`), so
+adding a third composes exactly the same way the second one did.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from dataclasses import dataclass
+from typing import Any, Callable
+
+try:
+    # Real-repo shape: every numbered module lives flat in one directory.
+    from aura_v05368_earnings_blackout_gate import (
+        CombinedEnforcementVerdict,
+        combine_enforcement_check_fns,
+    )
+except ImportError:  # pragma: no cover -- local-testing-only fallback, see module docstring
+    _STAGED_AURA_DIR = os.environ.get(
+        "AURA_CORE_DIR",
+        "/mnt/user-data/uploads/AI automated trading/aura-autonomous-trading-agent",
+    )
+    if _STAGED_AURA_DIR not in sys.path:
+        sys.path.insert(0, _STAGED_AURA_DIR)
+    from aura_v05368_earnings_blackout_gate import (  # noqa: F401 (re-imported for the local-testing path)
+        CombinedEnforcementVerdict,
+        combine_enforcement_check_fns,
+    )
+
+from borrow_data_feeds import BorrowDataProvider, ShortInterestDataProvider
+from borrow_fee_gate import (
+    DEFAULT_CAUTION_ZONE_MIN_RATE,
+    DEFAULT_HARD_VETO_ANNUALIZED_RATE,
+    DEFAULT_SPIKE_MULTIPLE_FORCES_EXIT,
+    build_borrow_fee_check_fn,
+)
+from gap_tail_risk_gate import (
+    DEFAULT_MAX_SINGLE_POSITION_LOSS_PCT_OF_EQUITY,
+    DEFAULT_OVERNIGHT_GAP_PERCENTILE_TAIL,
+    DEFAULT_WORST_PLAUSIBLE_GAP_MULTIPLE,
+    build_gap_tail_risk_check_fn,
+)
+from squeeze_crowding_gate import (
+    DEFAULT_DAYS_TO_COVER_VETO,
+    DEFAULT_INTRADAY_PRICE_PCT_THRESHOLD,
+    DEFAULT_INTRADAY_VOLUME_MULTIPLE_THRESHOLD,
+    DEFAULT_SHORT_INTEREST_PCT_VETO,
+    DEFAULT_VOLUME_LOOKBACK_DAYS,
+    build_squeeze_crowding_check_fn,
+)
+
+VERSION = "AURA Track B v0.1.0"
+ENGINE = "SHORT_PROTECTIVE_GATES"
+
+
+@dataclass(frozen=True, slots=True)
+class ShortProtectiveGatesConfig:
+    """Every threshold below is a PROPOSED institutional default, NOT yet
+    validated for AURA specifically -- see module docstring."""
+
+    # borrow_fee_gate.py
+    hard_veto_annualized_rate: float = DEFAULT_HARD_VETO_ANNUALIZED_RATE
+    caution_zone_min_rate: float = DEFAULT_CAUTION_ZONE_MIN_RATE
+    spike_multiple_forces_exit: float = DEFAULT_SPIKE_MULTIPLE_FORCES_EXIT
+
+    # squeeze_crowding_gate.py
+    short_interest_pct_veto: float = DEFAULT_SHORT_INTEREST_PCT_VETO
+    days_to_cover_veto: float = DEFAULT_DAYS_TO_COVER_VETO
+    intraday_price_pct_threshold: float = DEFAULT_INTRADAY_PRICE_PCT_THRESHOLD
+    intraday_volume_multiple_threshold: float = DEFAULT_INTRADAY_VOLUME_MULTIPLE_THRESHOLD
+    volume_lookback_days: int = DEFAULT_VOLUME_LOOKBACK_DAYS
+
+    # gap_tail_risk_gate.py
+    worst_plausible_gap_multiple: float = DEFAULT_WORST_PLAUSIBLE_GAP_MULTIPLE
+    overnight_gap_percentile: float = DEFAULT_OVERNIGHT_GAP_PERCENTILE_TAIL
+    max_single_position_loss_pct_of_equity: float = DEFAULT_MAX_SINGLE_POSITION_LOSS_PCT_OF_EQUITY
+
+
+def build_short_protective_check_fn(
+    *,
+    borrow_feed: BorrowDataProvider,
+    short_interest_feed: ShortInterestDataProvider,
+    bars_provider: Callable[[str], Any],
+    account_equity_lookup: Callable[[], float],
+    entry_price_lookup: Callable[[str], float],
+    config: ShortProtectiveGatesConfig | None = None,
+) -> Callable[[str, str, Any, Any], CombinedEnforcementVerdict]:
+    """Builds all three short-protective gates from `config` (defaults
+    applied if omitted) and composes them via the REAL `.368`
+    `combine_enforcement_check_fns` into one `(symbol, direction,
+    quantity, decision) -> CombinedEnforcementVerdict` closure.
+
+    `bars_provider` is shared between the squeeze-crowding gate's same-
+    day signature sub-check and the gap-tail-risk gate's historical-gap
+    computation -- both read daily bars for the same symbol, and this
+    function hands each gate the same callable rather than constructing
+    two separate ones, so a caller only has to wire one real bars source.
+    """
+    cfg = config or ShortProtectiveGatesConfig()
+
+    borrow_fee_check_fn = build_borrow_fee_check_fn(
+        borrow_feed,
+        hard_veto_annualized_rate=cfg.hard_veto_annualized_rate,
+        caution_zone_min_rate=cfg.caution_zone_min_rate,
+        spike_multiple_forces_exit=cfg.spike_multiple_forces_exit,
+    )
+    squeeze_crowding_check_fn = build_squeeze_crowding_check_fn(
+        short_interest_feed,
+        bars_provider,
+        short_interest_pct_veto=cfg.short_interest_pct_veto,
+        days_to_cover_veto=cfg.days_to_cover_veto,
+        intraday_price_pct_threshold=cfg.intraday_price_pct_threshold,
+        intraday_volume_multiple_threshold=cfg.intraday_volume_multiple_threshold,
+        volume_lookback_days=cfg.volume_lookback_days,
+    )
+    gap_tail_risk_check_fn = build_gap_tail_risk_check_fn(
+        bars_provider,
+        account_equity_lookup,
+        entry_price_lookup,
+        worst_plausible_gap_multiple=cfg.worst_plausible_gap_multiple,
+        overnight_gap_percentile=cfg.overnight_gap_percentile,
+        max_single_position_loss_pct_of_equity=cfg.max_single_position_loss_pct_of_equity,
+    )
+
+    combined = combine_enforcement_check_fns(
+        borrow_fee_check_fn, squeeze_crowding_check_fn, gap_tail_risk_check_fn,
+    )
+    assert combined is not None  # three live fns were always supplied above
+    return combined

@@ -374,6 +374,7 @@ def run_one_live_cycle(
     earnings_state_dir: Path | None = None,
     full_universe_scan_status: dict[str, Any] | None = None,
     decision_journal_path: Path | None = None,
+    institutional_config: Any | None = None,
 ) -> dict[str, Any]:
     result = manual_trigger_module.run_manual_trigger_stage1b_cycle(
         symbol_requests,
@@ -399,6 +400,7 @@ def run_one_live_cycle(
         earnings_state_dir=earnings_state_dir,
         full_universe_scan_status=full_universe_scan_status,
         decision_journal_path=decision_journal_path,
+        institutional_config=institutional_config,  # Extension, 2026-10-09 -- see .363's own docstring note
     )
     result = dict(result)
     result["live_trader_engine"] = ENGINE
@@ -446,6 +448,7 @@ def run_scheduled_live_loop(
     shared_intent_path: Path | None = None,
     shared_intent_max_age_seconds: float = 600.0,
     combined_alpaca_notional_ratio_limit: float | None = None,
+    institutional_config: Any | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log_fn: Callable[[str], None] = print,
@@ -544,6 +547,7 @@ def run_scheduled_live_loop(
             earnings_state_dir=earnings_state_dir,
             full_universe_scan_status=full_universe_scan_status,
             decision_journal_path=decision_journal_path,
+            institutional_config=institutional_config,
         )
 
         # -- Extension, 2026-10-02: DELTAX cross-awareness post-cycle
@@ -698,6 +702,19 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
                          help="REQUIRED. Once started, this process can submit real orders to your Alpaca PAPER "
                               "account repeatedly and unattended until stopped (kill-switch file or Ctrl+C). There "
                               "is no way to pass this flag as false -- omit it to refuse to start at all.")
+    parser.add_argument("--enable-institutional-gates", action="store_true",
+                         help="Extension -- 2026-10-09 (Martin, 'PRODUCTION MANDATE -- OPTION 1 ENFORCEMENT & "
+                              "ENTRY-POINT WIRING'). Activates the real, calibrated .344/.344-portfolio Greeks/"
+                              "macro-bucket enforcement (SAME_DIRECTION_STACKING_HARD_THRESHOLD=0.20, "
+                              "PROPOSED_GREEKS_LIMITS_CONFIG) via .55's InstitutionalGatesConfig, on EVERY cycle "
+                              "this loop runs. Track B's short-protective gates (borrow-fee / squeeze-crowding / "
+                              "gap-tail-risk) stay explicitly INERT -- no real borrow-fee or short-interest "
+                              "vendor feed exists in this codebase yet (see "
+                              "institutional/track_b/borrow_data_feeds.py's module docstring). Fails closed "
+                              "before any client is built or any order is routed to the broker if the "
+                              "institutional gate modules cannot be loaded (e.g. AURA_CORE_DIR unreadable or "
+                              "missing a required core module file). Omit to reproduce this module's "
+                              "pre-2026-10-09 behavior exactly (no institutional gating at all).")
     args = parser.parse_args(argv)
 
     universe_mode_flags = [bool(args.requests_config), bool(args.scan_pinned_universe), bool(args.scan_full_universe)]
@@ -710,6 +727,39 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
     if args.scan_full_universe and args.full_universe_state_dir is None:
         print("FAIL-CLOSED: FULL_UNIVERSE_STATE_DIR_REQUIRED_WITH_SCAN_FULL_UNIVERSE", file=sys.stderr)
         return 1
+
+    # --- INSTITUTIONAL GATES preflight -- fail closed BEFORE any client is
+    # built or any order is routed to the broker (Martin's explicit
+    # directive). Only runs at all when --enable-institutional-gates was
+    # passed; a bare run is completely unaffected. Same discipline as
+    # .363's own identical preflight (kept independent here rather than
+    # imported, since this check must run before .363 itself is even
+    # loaded below). ---
+    institutional_stage1_module = None
+    institutional_macro_buckets_module = None
+    institutional_greeks_limits_module = None
+    if args.enable_institutional_gates:
+        try:
+            institutional_stage1_module = _load_module(
+                "aura_v05355_stage1_paper_trading_runner", "aura_v05355_stage1_paper_trading_runner.py"
+            )  # also os.environ.setdefault("AURA_CORE_DIR", ...)
+            institutional_stage1_module.load_institutional_portfolio_module()
+            institutional_stage1_module.load_institutional_track_b_module()  # import-only check; not used while inert
+            institutional_macro_buckets_module = _load_module("macro_buckets", "institutional/portfolio/macro_buckets.py")
+            institutional_greeks_limits_module = _load_module("greeks_limits", "institutional/portfolio/greeks_limits.py")
+        except Exception as exc:  # noqa: BLE001 -- fail-closed at the CLI boundary, before any broker contact
+            print(
+                f"FAIL-CLOSED: INSTITUTIONAL_GATES_PREFLIGHT_FAILED:{type(exc).__name__}:{exc} -- "
+                "--enable-institutional-gates was passed but the institutional gate modules could not be "
+                "loaded (commonly: AURA_CORE_DIR unreadable, or missing a required core module file). "
+                "Aborting before any client was built or any order was routed to the broker.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "[AURA INSTITUTIONAL CORE] Portfolio & Greeks gates ENABLED (Threshold: 0.20). "
+            "Equities Short-Side gates INERT (Missing live vendor feeds)."
+        )
 
     manual_trigger_module = load_manual_trigger_module()
     scheduled_runner_module = load_scheduled_runner_module()
@@ -750,6 +800,26 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             symbol_source = f"requests_config:{args.requests_config}"
         lookback_bars = args.lookback_bars or signal_source_module.FROZEN_TECHNICAL_PARAMS.min_bars_required
         universe_version = args.universe_version or signal_source_module.UNIVERSE_VERSION
+
+        # --- INSTITUTIONAL GATES config -- only built when the preflight
+        # above succeeded. Built ONCE at startup (not per cycle): the
+        # symbol universe this loop scans is itself resolved once above,
+        # and the underlying real feeds/configs don't change mid-run.
+        # track_b_borrow_feed/track_b_short_interest_feed are explicitly
+        # None -- see .363's own identical note for why. --
+        institutional_config = None
+        if args.enable_institutional_gates:
+            bars_provider_module = _load_module("aura_v054_alpaca_bars_provider", "aura_v054_alpaca_bars_provider.py")
+            institutional_bars_provider = bars_provider_module.AlpacaEquityBarsProvider(api_key=api_key, secret_key=secret_key)
+            institutional_bars_provider.prefetch(tuple(r.symbol for r in symbol_requests))
+            institutional_config = institutional_stage1_module.InstitutionalGatesConfig(
+                track_b_borrow_feed=None,
+                track_b_short_interest_feed=None,
+                track_b_bars_provider=institutional_bars_provider.get_daily_bars,
+                track_b_config=None,
+                macro_config=institutional_macro_buckets_module.PROPOSED_MACRO_BUCKET_CONFIG,
+                greeks_config=institutional_greeks_limits_module.PROPOSED_GREEKS_LIMITS_CONFIG,
+            )
     except manual_trigger_module.Stage1BManualTriggerCliError as exc:
         print(f"FAIL-CLOSED: {exc}", file=sys.stderr)
         return 1
@@ -796,6 +866,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
         f"DELTAX cross-awareness: "
         f"{'ENABLED (shared_intent_path=' + str(shared_intent_path) + ', combined_alpaca_notional_ratio_limit=' + str(args.combined_alpaca_notional_ratio_limit) + ')' if shared_intent_path is not None else 'DISABLED (no --shared-intent-path and AURA_DELTAX_SHARED_INTENT_PATH not set)'}"
     )
+    print(
+        f"institutional gates (.55 InstitutionalGatesConfig): "
+        f"{'ENABLED -- portfolio/Greeks/macro-bucket enforcement (0.20 stacking threshold) ON every cycle; Track B short-protective gates INERT (no real vendor feed yet)' if institutional_config is not None else 'DISABLED (--enable-institutional-gates not set)'}"
+    )
     if full_universe_scan_status is not None:
         print(
             f"full universe scan: {full_universe_scan_status['status']} "
@@ -839,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover -- live wiri
             shared_intent_path=shared_intent_path,
             shared_intent_max_age_seconds=args.shared_intent_max_age_seconds,
             combined_alpaca_notional_ratio_limit=args.combined_alpaca_notional_ratio_limit,
+            institutional_config=institutional_config,
         )
     except KeyboardInterrupt:
         print("\nStopped by Ctrl+C.")
