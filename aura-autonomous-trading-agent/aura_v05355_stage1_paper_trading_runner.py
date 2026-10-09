@@ -91,6 +91,7 @@ numbers" discipline extended to costs.
 """
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -102,6 +103,26 @@ ENGINE = "STAGE1_PAPER_TRADING_RUNNER"
 SCHEMA_VERSION = "1.0"
 
 ROOT = Path(__file__).resolve().parent
+
+# --- INSTITUTIONAL Track B + Portfolio wiring (2026-10-09) --------------
+# track_b/'s and portfolio/'s own modules import each other as flat
+# same-directory siblings (e.g. `from borrow_data_feeds import ...`,
+# `import macro_buckets`) -- each subpackage's OWN directory, not .355's
+# ROOT, must be on sys.path for those internal imports to resolve.
+_INSTITUTIONAL_DIR = ROOT / "institutional"
+_TRACK_B_DIR = _INSTITUTIONAL_DIR / "track_b"
+_PORTFOLIO_DIR = _INSTITUTIONAL_DIR / "portfolio"
+for _d in (_TRACK_B_DIR, _PORTFOLIO_DIR):
+    _d_str = str(_d)
+    if _d_str not in sys.path:
+        sys.path.insert(0, _d_str)
+
+# portfolio/'s own AURA_CORE_DIR hardening (2026-10-09) expects to be
+# pointed at the directory containing the real aura_v053NN modules -- which
+# is exactly .355's own ROOT. Set it here, once, so Martin does not have to
+# separately configure this environment variable in production; an
+# operator-set value always wins (setdefault, never overwritten).
+os.environ.setdefault("AURA_CORE_DIR", str(ROOT))
 
 DEFAULT_STRATEGY_ID = "STAGE1_SYNTHETIC_SCENARIO"
 DEFAULT_STRATEGY_VERSION = "v1-synthetic-dry-run"
@@ -175,6 +196,14 @@ def load_fill_reconciliation_module():
 
 def load_earnings_blackout_module():
     return _load_module("aura_v05368_earnings_blackout_gate", "aura_v05368_earnings_blackout_gate.py")
+
+
+def load_institutional_track_b_module():
+    return _load_module("short_protective_gates", "institutional/track_b/short_protective_gates.py")
+
+
+def load_institutional_portfolio_module():
+    return _load_module("portfolio_additional_enforcement", "institutional/portfolio/portfolio_additional_enforcement.py")
 
 
 def load_decision_journal_module():
@@ -495,6 +524,78 @@ def _find_position(snapshot: Any, symbol: str) -> dict[str, Any] | None:
 # ============================================================================
 
 
+
+# --- INSTITUTIONAL Track B + Portfolio composition helpers (2026-10-09) ---
+@dataclass(frozen=True, slots=True)
+class InstitutionalGatesConfig:
+    """Bundles the caller-supplied collaborators both new subpackages
+    need. `None` (the default everywhere this is threaded through) skips
+    institutional gating entirely -- reproduces this module's pre-
+    2026-10-09 behavior exactly, same convention as `earnings_calendar_
+    state`/`limits` elsewhere in this file."""
+    track_b_borrow_feed: Any
+    track_b_short_interest_feed: Any
+    track_b_bars_provider: Callable[[str], Any]
+    track_b_config: Any | None
+    macro_config: Any | None
+    greeks_config: Any
+
+
+def _compose_with_institutional_gates(
+    enforcement_check_fn: Callable[[str, str, Any, Any], Any] | None,
+    *,
+    institutional_config: "InstitutionalGatesConfig | None",
+    snapshot_provider: Callable[[], Any],
+    account_equity_lookup: Callable[[], float],
+    reference_price_fn: Callable[[str], float],
+    now_dt: datetime,
+) -> Callable[[str, str, Any, Any], Any] | None:
+    if institutional_config is None:
+        return enforcement_check_fn
+    track_b_module = load_institutional_track_b_module()
+    portfolio_module = load_institutional_portfolio_module()
+    earnings_module = load_earnings_blackout_module()  # reuse .368's combine_enforcement_check_fns, same as _compose_with_earnings_blackout
+
+    track_b_check_fn = track_b_module.build_short_protective_check_fn(
+        borrow_feed=institutional_config.track_b_borrow_feed,
+        short_interest_feed=institutional_config.track_b_short_interest_feed,
+        bars_provider=institutional_config.track_b_bars_provider,
+        account_equity_lookup=account_equity_lookup,
+        entry_price_lookup=reference_price_fn,
+        config=institutional_config.track_b_config,
+    )
+    portfolio_check_fn = portfolio_module.build_additional_portfolio_check_fn(
+        snapshot_provider=snapshot_provider,
+        greeks_config=institutional_config.greeks_config,
+        account_equity_lookup=account_equity_lookup,
+        macro_config=institutional_config.macro_config,
+        now_fn=lambda: now_dt,
+    )
+    return earnings_module.combine_enforcement_check_fns(
+        enforcement_check_fn, track_b_check_fn, portfolio_check_fn,
+    )
+
+
+def _account_equity_from_snapshot(snapshot: Any) -> float | None:
+    """Reuses .344's OWN real total-equity computation verbatim
+    (aura_v05343_portfolio_exposure_observability.py lines 902/918) --
+    never 'cash + sum(position.market_value)' (PortfolioSnapshot has no
+    cash field; PositionRecord has no market_value field -- only
+    notional_usd; see institutional/INTEGRATION_HOOKS_2026-10-09.md's
+    RESOLVED 2026-10-09 section for the correction note). A venue that
+    failed or was never configured already carries equity=None on its
+    own VenueFetchStatus (set by fetch_alpaca_portfolio/
+    fetch_mexc_portfolio themselves) -- excluding None here is not a new
+    judgment call, it is how `.343`/`.344` already treat an unreadable
+    venue. Returns None (never 0.0, never a guessed fallback) when no
+    venue has a usable equity figure -- both greeks_limits.py and
+    macro_buckets.py already fail closed (NOT_COMPUTABLE, never a silent
+    PASS) on `account_equity_usd is None or account_equity_usd <= 0`."""
+    equity_by_venue = {v: status.equity for v, status in snapshot.venue_fetch_status.items()}
+    values = [e for e in equity_by_venue.values() if e is not None]
+    return sum(values) if values else None
+
+
 def _compose_with_earnings_blackout(
     enforcement_check_fn: Callable[[str, str, Any, Any], Any] | None,
     *,
@@ -530,6 +631,7 @@ def run_stage1a_dry_run(
     now: datetime | None = None,
     synthetic_account_equity_usd: float | None = None,
     earnings_calendar_state: Any | None = None,
+    institutional_config: "InstitutionalGatesConfig | None" = None,   # NEW
 ) -> Stage1CycleReport:
     """Exercises the full lifecycle from evidence through `.38` construction
     preview (`READY_FOR_SUBMISSION`/`CONSTRUCTION_ONLY`), never a real
@@ -642,6 +744,19 @@ def run_stage1a_dry_run(
             enforcement_module=enforcement_module, observability_module=observability_module,
         )
 
+    # --- INSTITUTIONAL Track B + Portfolio composition (2026-10-09) ----
+    enforcement_check_fn = _compose_with_institutional_gates(
+        enforcement_check_fn,
+        institutional_config=institutional_config,
+        snapshot_provider=lambda: no_broker_snapshot if limits is not None else None,
+        account_equity_lookup=lambda: (
+            synthetic_account_equity_usd if synthetic_account_equity_usd is not None else 0.0
+        ),
+        reference_price_fn=reference_price_fn or (lambda s: 0.0),
+        now_dt=now_dt,
+    )
+    # ---------------------------------------------------------------------
+
     enforcement_check_fn = _compose_with_earnings_blackout(
         enforcement_check_fn, earnings_calendar_state=earnings_calendar_state, now_dt=now_dt,
     )
@@ -723,6 +838,7 @@ def run_stage1b_paper_cycle(
     now: datetime | None = None,
     earnings_calendar_state: Any | None = None,
     journal_path: Path | None = None,
+    institutional_config: "InstitutionalGatesConfig | None" = None,   # NEW
 ) -> Stage1CycleReport:
     """`supervision_kwargs` MUST include an explicit `auth_config` (with
     `execution_authorized`/`paper_execution_authorized` set True -- `.36`'s
@@ -825,6 +941,18 @@ def run_stage1b_paper_cycle(
         now=enforcement_now, decisions_by_symbol=decisions_by_symbol,
         enforcement_module=enforcement_module, observability_module=observability_module,
     )
+
+    # --- INSTITUTIONAL Track B + Portfolio composition (2026-10-09) ----
+    enforcement_check_fn = _compose_with_institutional_gates(
+        enforcement_check_fn,
+        institutional_config=institutional_config,
+        snapshot_provider=lambda: snapshot,
+        account_equity_lookup=lambda: _account_equity_from_snapshot(snapshot),
+        reference_price_fn=reference_price_fn,
+        now_dt=now_dt,
+    )
+    # ---------------------------------------------------------------------
+
     enforcement_check_fn = _compose_with_earnings_blackout(
         enforcement_check_fn, earnings_calendar_state=earnings_calendar_state, now_dt=now_dt,
     )
