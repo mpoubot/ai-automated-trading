@@ -70,3 +70,7 @@ aura-autonomous-trading-agent/stage3_live_test.json
 
 # Patch-script backups (fix_staged_path_fallbacks / apply_institutional_hooks)
 *.bak-*
+
+# Reference docs and notes (not part of the trading bot codebase)
+Docs/
+AURA Live Trading*.pdf

@@ -228,3 +228,9 @@ __marimo__/
 
 # Patch-script backups (fix_staged_path_fallbacks / apply_institutional_hooks)
 *.bak-*
+
+# Local calibration/backtest output artifacts (not tracked)
+calibration_result.json
+track_b_90day_alpaca_backtest_*.json
+historical_bars/
+live_evidence_runs/
