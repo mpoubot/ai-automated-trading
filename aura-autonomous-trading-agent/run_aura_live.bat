@@ -4,7 +4,10 @@ REM run_aura_live.bat -- AURA Stage 1B production launch
 REM Generated 2026-10-09, UPDATED 2026-10-10 (dual-bot A/B parallel run, per
 REM Martin's explicit "PRODUCTION DIRECTIVE"), UPDATED AGAIN 2026-10-10
 REM (dual-dashboard port isolation, per Martin's "PRODUCTION MANDATE --
-REM DUAL-DASHBOARD PORT ISOLATION FOR BOT 2"). Launches FOUR concurrent windows:
+REM DUAL-DASHBOARD PORT ISOLATION FOR BOT 2"), UPDATED AGAIN 2026-10-10
+REM (third parallel bot + dashboard, per Martin's "PRODUCTION DIRECTIVE --
+REM SEPARATE BOT SESSION & DEDICATED DASHBOARD FOR BOT 3"). Launches FIVE
+REM concurrent windows:
 REM   1. aura_v05366_live_trader_dashboard.py  -- read-only Streamlit dashboard
 REM      for Bot 1, the real companion to .365 (reads .365's real output dir,
 REM      makes real read-only Alpaca position/kill-switch calls). NOT .358,
@@ -94,6 +97,7 @@ setlocal
 set "AURA_REPO=C:\Users\Martin\Desktop\AI agents\AI automated trading\aura-autonomous-trading-agent"
 set "LOG_FILE=live_evidence_runs\production_launch_log.txt"
 set "LOG_FILE_BOT2=live_evidence_runs\production_launch_log_bot2_sp500.txt"
+set "LOG_FILE_BOT3=live_evidence_runs\production_launch_log_bot3_highrisk.txt"
 
 cd /d "%AURA_REPO%"
 if not exist "live_evidence_runs" mkdir "live_evidence_runs"
@@ -113,12 +117,16 @@ echo ============================================================
 echo.
 echo Launching dashboard window 1 (.366, Streamlit port 8501 default, Bot 1 output only)...
 echo Launching dashboard window 2 (.366, Streamlit port 5001, Bot 2 output only)...
+echo Launching dashboard window 3 (.366, Streamlit port 5002, Bot 3 output only)...
 echo Launching Bot 1 / Pinned Core window (.365, primary Alpaca account, --enable-institutional-gates)...
 echo Launching Bot 2 / S&P 500 Expansion window (.365, SEPARATE Alpaca account, --enable-institutional-gates)...
+echo Launching Bot 3 / High-Risk Russell 2000 window (.365, THIRD SEPARATE Alpaca account, --enable-institutional-gates)...
 echo Bot 1 stdout/stderr -^> %LOG_FILE% ^(appended, not shown live in its window^)
 echo Bot 2 stdout/stderr -^> %LOG_FILE_BOT2% ^(appended, not shown live in its window^)
+echo Bot 3 stdout/stderr -^> %LOG_FILE_BOT3% ^(appended, not shown live in its window^)
 echo Bot 1 kill switch: create "%AURA_REPO%\STOP_365_LIVE_TRADER" to stop Bot 1 before its next cycle.
 echo Bot 2 kill switch: create "%AURA_REPO%\STOP_365_LIVE_TRADER_BOT2_SP500" to stop Bot 2 before its next cycle -- INDEPENDENT of Bot 1's.
+echo Bot 3 kill switch: create "%AURA_REPO%\STOP_365_LIVE_TRADER_BOT3_HIGHRISK" to stop Bot 3 before its next cycle -- INDEPENDENT of Bot 1 and Bot 2.
 echo.
 
 REM --- Window 1: read-only live dashboard (.366) -- Bot 1's output dir only --
@@ -135,6 +143,13 @@ REM defaults -- same collision class already fixed for the trader windows
 REM below) so this dashboard reads Bot 2's real kill-switch/order-log state,
 REM not Bot 1's.
 start "AURA Dashboard - Bot2 SP500 (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5001 -- --output-dir stage1b_live_trader_output_bot2_sp500 --kill-switch-file STOP_365_LIVE_TRADER_BOT2_SP500 --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot2_sp500.jsonl"
+REM --- Window 1c: THIRD dashboard instance, Bot 3's output dir, port 5002 -
+REM Same pattern as Window 1b: Streamlit's own --server.port 5002 flag
+REM before the "--" separator, Bot-3-specific --output-dir/--kill-switch-
+REM file/--daily-order-log-path after it, so this dashboard reads Bot 3's
+REM real state only -- completely independent of Window 1 and Window 1b.
+start "AURA Dashboard - Bot3 HighRisk (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5002 -- --output-dir stage1b_live_trader_output_bot3_highrisk --kill-switch-file STOP_365_LIVE_TRADER_BOT3_HIGHRISK --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot3_highrisk.jsonl"
+
 
 REM --- Window 2: Bot 1 / Pinned Core -- primary Alpaca account, UNCHANGED ----
 REM NOTE: stdout/stderr are fully redirected to the log file below, so this
@@ -142,7 +157,7 @@ REM window will appear blank while running -- that is the "append to a
 REM rolling file" behavior Task 2 asked for, not a hang. Tail the log file in
 REM a separate window to watch it live, e.g.:
 REM   powershell -Command "Get-Content '%AURA_REPO%\%LOG_FILE%' -Wait -Tail 50"
-start "AURA Bot 1 - Pinned Core (.365)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && (echo ===== %DATE% %TIME% NEW LAUNCH ===== & python aura_v05365_stage1b_scheduled_live_trader.py --scan-pinned-universe --max-snapshot-age-seconds 300 --fill-poll-timeout-seconds 30 --fill-poll-interval-seconds 2 --enable-institutional-gates --i-confirm-this-runs-unattended-live-paper-trading) 1>>%LOG_FILE% 2>&1"
+start "AURA Bot 1 - Pinned Core (.365)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && (echo ===== %DATE% %TIME% NEW LAUNCH ===== & python aura_v05365_stage1b_scheduled_live_trader.py --strategy-id aura_core_pinned --scan-pinned-universe --max-snapshot-age-seconds 300 --fill-poll-timeout-seconds 30 --fill-poll-interval-seconds 2 --enable-institutional-gates --i-confirm-this-runs-unattended-live-paper-trading) 1>>%LOG_FILE% 2>&1"
 
 REM --- Window 3: Bot 2 / S&P 500 Expansion -- SEPARATE Alpaca account --------
 REM Credentials below are set ONLY inside this one cmd.exe window's own
@@ -168,19 +183,42 @@ REM                               would interleave into one history, breaking th
 REM                               clean A/B comparison this whole exercise is for.
 REM   --daily-order-log-path     .365's own default is likewise ONE shared file.
 REM   --kill-switch-file         so Martin can stop either bot independently.
-start "AURA Bot 2 - SP500 Expansion (.365)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && set ALPACA_EQUITY_PAPER_API_KEY=YOUR_SECONDARY_ALPACA_KEY_ID_HERE && set ALPACA_EQUITY_PAPER_SECRET_KEY=YOUR_SECONDARY_ALPACA_SECRET_KEY_HERE && (echo ===== %DATE% %TIME% NEW LAUNCH - BOT2 SP500 ===== & python aura_v05365_stage1b_scheduled_live_trader.py --requests-config aura_v05351_sp500_requests_config.json --strategy-id SP500_EXPANSION_BOT2 --output-dir stage1b_live_trader_output_bot2_sp500 --decision-journal-path regime_output\decision_journal\stage1b_decisions_bot2_sp500.jsonl --equity-history-log-path regime_output\equity_history_log\alpaca_equity_history_bot2_sp500.jsonl --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot2_sp500.jsonl --kill-switch-file STOP_365_LIVE_TRADER_BOT2_SP500 --max-snapshot-age-seconds 300 --fill-poll-timeout-seconds 30 --fill-poll-interval-seconds 2 --enable-institutional-gates --i-confirm-this-runs-unattended-live-paper-trading) 1>>%LOG_FILE_BOT2% 2>&1"
+start "AURA Bot 2 - SP500 Expansion (.365)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && set ALPACA_EQUITY_PAPER_API_KEY=PKDZSXC6R2LLNMGD3GAVJ3QZHT && set ALPACA_EQUITY_PAPER_SECRET_KEY=2bBeh3thSqp2YBMka2nmCLwHhwpg1LuHe7SGK2DrHe4L && (echo ===== %DATE% %TIME% NEW LAUNCH - BOT2 SP500 ===== & python aura_v05365_stage1b_scheduled_live_trader.py --requests-config aura_v05351_sp500_requests_config.json --strategy-id SP500_EXPANSION_BOT2 --output-dir stage1b_live_trader_output_bot2_sp500 --decision-journal-path regime_output\decision_journal\stage1b_decisions_bot2_sp500.jsonl --equity-history-log-path regime_output\equity_history_log\alpaca_equity_history_bot2_sp500.jsonl --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot2_sp500.jsonl --kill-switch-file STOP_365_LIVE_TRADER_BOT2_SP500 --max-snapshot-age-seconds 300 --fill-poll-timeout-seconds 30 --fill-poll-interval-seconds 2 --enable-institutional-gates --i-confirm-this-runs-unattended-live-paper-trading) 1>>%LOG_FILE_BOT2% 2>&1"
+
+REM --- Window 4: Bot 3 / High-Risk Russell 2000 -- THIRD SEPARATE Alpaca ---
+REM account. Same isolation pattern as Window 3: credentials are set ONLY
+REM inside this one cmd.exe window's own session, never written to .env,
+REM never visible to Window 2 or Window 3. REPLACE THE TWO PLACEHOLDER
+REM VALUES BELOW before running this script. Universe is the 50-ticker
+REM aura_v05351_highrisk_universe.json / aura_v05351_highrisk_requests_
+REM config.json working set (Russell 2000, ranked by IWM index weight as a
+REM liquidity proxy -- see that file's own description field for the full
+REM methodology and its stated limitation: this is NOT a true beta-screened
+REM list). Same shared --enable-institutional-gates / 0.20 macro_buckets.py
+REM catch-all as Bot 1 and Bot 2 -- no separate "Bot 3 only" config, same
+REM reasoning as Window 3's own comment above. Every path flag is again
+REM explicitly overridden to a Bot-3-specific value for the same reason as
+REM Window 3: .365's own defaults are NOT strategy-id-scoped and would
+REM otherwise silently collide with Bot 1 and/or Bot 2.
+start "AURA Bot 3 - HighRisk Russell2000 (.365)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && set ALPACA_EQUITY_PAPER_API_KEY=PKF7333KG3QYW4ZGNDEICIK4EF && set ALPACA_EQUITY_PAPER_SECRET_KEY=86Nu4UJH49tvy49TEQUsiqAHdVwPMbtyaANDkuQNkJpD && (echo ===== %DATE% %TIME% NEW LAUNCH ===== & python aura_v05365_stage1b_scheduled_live_trader.py --requests-config aura_v05351_highrisk_requests_config.json --strategy-id HIGHRISK_RUSSELL2000_BOT3 --output-dir stage1b_live_trader_output_bot3_highrisk --decision-journal-path regime_output\decision_journal\stage1b_decisions_bot3_highrisk.jsonl --equity-history-log-path regime_output\equity_history_log\alpaca_equity_history_bot3_highrisk.jsonl --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot3_highrisk.jsonl --kill-switch-file STOP_365_LIVE_TRADER_BOT3_HIGHRISK --max-snapshot-age-seconds 300 --fill-poll-timeout-seconds 30 --fill-poll-interval-seconds 2 --enable-institutional-gates --i-confirm-this-runs-unattended-live-paper-trading) 1>>%LOG_FILE_BOT3% 2>&1"
 
 echo.
-echo All four windows launched.
+echo All five windows launched.
 echo   Dashboard 1 (Bot 1): check its window for the local Streamlit URL (default http://localhost:8501)
 echo   Dashboard 2 (Bot 2): http://localhost:5001
+echo   Dashboard 3 (Bot 3): http://localhost:5002
 echo   Bot 1 log:        %AURA_REPO%\%LOG_FILE%
 echo   Bot 1 cycle JSON: %AURA_REPO%\stage1b_live_trader_output\
 echo   Bot 2 log:        %AURA_REPO%\%LOG_FILE_BOT2%
 echo   Bot 2 cycle JSON: %AURA_REPO%\stage1b_live_trader_output_bot2_sp500\
+echo   Bot 3 log:        %AURA_REPO%\%LOG_FILE_BOT3%
+echo   Bot 3 cycle JSON: %AURA_REPO%\stage1b_live_trader_output_bot3_highrisk\
 echo.
 echo REMINDER: the Bot 2 trader window will fail closed at startup if you have
 echo not replaced YOUR_SECONDARY_ALPACA_KEY_ID_HERE / YOUR_SECONDARY_ALPACA_SECRET_KEY_HERE
 echo above with your second Alpaca paper account's real credentials.
+echo REMINDER: the Bot 3 trader window will fail closed at startup if you have
+echo not replaced YOUR_TERTIARY_ALPACA_KEY_ID_HERE / YOUR_TERTIARY_ALPACA_SECRET_KEY_HERE
+echo above with your THIRD, separate Alpaca paper account's real credentials.
 echo.
 endlocal
