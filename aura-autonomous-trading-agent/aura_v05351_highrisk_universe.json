@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "description": "Top-50 Russell 2000 (IWM) constituents by index weight, for the 'Bot 3 / High-Risk Small-Cap' parallel paper-trading instance. METHODOLOGY NOTE (read before relying on this for a true high-beta screen): index weight was used as a LIQUIDITY PROXY (no free, non-JS-rendered source returned true average-daily-volume or realized-beta rankings across the ~2,000 Russell 2000 constituents as of this build). Weight-by-market-cap is NOT the same as high-beta -- several names in this top-50 (e.g. regional banks UMBF/ONB/VLY, REIT-like CTRE/RHP, steady industrials ESE/TEX/NPO/FSS/MYRG/ACA/CMC/AROC) are typically LOWER beta than the broad market, not higher, despite being Russell 2000 members. Every ticker below was confirmed by a live web source fetched 2026-10-10 (not recalled from training memory) -- per Martin's explicit 'don't guess' directive, no ticker was backfilled from memory for a company a live source didn't explicitly show a symbol for.",
+  "source": "Primary ranking: IWM (iShares Russell 2000 ETF) holdings table sorted by weight, fetched via chartrow.com/quote/iwm/holdings (Oct 9, 2026 estimated-today weights, 1,999 total positions, this file uses ranks 1-50). Cross-check: marketbeat.com/stocks/NYSE/IWM top-10-by-weight (independently confirms FROG, TXG, BTSG, GKOS, HUT, UMBF rankings). Ticker symbols for companies chartrow showed by name only (no ticker column) were individually confirmed via targeted web searches against primary sources (SEC EDGAR filings, exchange listing pages, IR pages) on 2026-10-10 -- see per-ticker confirmation list in 'ticker_resolution_sources' below.",
+  "constituent_count": 50,
+  "known_limitations": "This is a liquidity-by-index-weight proxy list, NOT a true beta-screened or average-daily-volume-ranked list -- no free, non-JavaScript-rendered data source returned either metric across the full Russell 2000 as of this build. Treat as a high-confidence working set for liquidity, not for the 'high-beta' business intent behind Bot 3. Index membership and weights change periodically and were not cross-checked against FTSE Russell's own official reconstitution data.",
+  "ticker_resolution_sources": {
+    "note": "These 38 tickers were shown by chartrow.com only as company names (no ticker column); each was individually confirmed via a live web search on 2026-10-10 against SEC EDGAR / exchange / IR sources before inclusion.",
+    "symbols": ["MOG.A", "MXL", "AGX", "RIOT", "ESE", "CTRE", "FCFS", "COMP", "QBTS", "ALKS", "ENS", "SNEX", "TEX", "CIFR", "PLXS", "NPO", "RHP", "CORZ", "TGTX", "FSS", "MYRG", "JBTM", "PCVX", "HQY", "ZWS", "KGS", "PTGX", "FLR", "HIMS", "LUMN", "IDCC", "EAT", "SLAB", "LNTH", "ACA", "KYMR", "VLY", "AROC", "CMC"]
+  },
+  "dropped_tickers": {
+    "note": "No tickers were dropped from the top-50-by-weight ranks 1-50 -- all 50 resolved to a live-source-confirmed symbol. Beyond rank 50, the source list continues (up to rank 100 was reviewed) but was not needed once 50 confirmed names were reached.",
+    "symbols": []
+  },
+  "symbols": [
+    "MOG.A", "FROG", "MXL", "AGX", "BTSG", "TWST", "RIOT", "UMBF", "GKOS", "TXG",
+    "ESE", "CTRE", "VSAT", "FCFS", "COMP", "QBTS", "ALKS", "HUT", "ENS", "KRYS",
+    "SNEX", "ONB", "TEX", "CIFR", "CYTK", "PLXS", "NPO", "RHP", "CORZ", "TGTX",
+    "FSS", "MYRG", "JBTM", "PCVX", "HQY", "ZWS", "KGS", "PTGX", "FLR", "HIMS",
+    "LUMN", "IDCC", "EAT", "SLAB", "LNTH", "ACA", "KYMR", "VLY", "AROC", "CMC"
+  ]
+}
