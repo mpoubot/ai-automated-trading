@@ -110,6 +110,49 @@ call" discipline)
     dataclass for backward-compatible storage/display only — it is not
     read by this enforcement path; the hard 0.15 threshold is the one
     actually enforced, by design, per Martin's directive.
+
+  - DYNAMIC CATCH-ALL MAPPING — ADDED 2026-10-10 per Martin's explicit
+    "PRODUCTION DIRECTIVE — GLOBAL RISK-GATE ENFORCEMENT PASS": prior to
+    this change, any symbol matching NO bucket/pattern anywhere in
+    `config.bucket_membership` (true of most of Bot 1's own existing
+    39-symbol pinned universe, and of every S&P 500 symbol that was not
+    one of the ~15 names explicitly hardcoded into
+    `PROPOSED_MACRO_BUCKET_CONFIG`) silently returned a weight of 0.0
+    from every bucket, which meant it was invisible to — not merely
+    passing — the same-direction-stacking check: `evaluate_stacking_
+    pretrade_direction()` would return an EMPTY tuple for it (no PASS,
+    no BLOCK), exempting it from the 0.20 hard threshold entirely.
+
+    `MacroBucketConfig.catch_all_bucket` (new field, default `None` —
+    same house convention as every other knob on this dataclass: zero
+    behavior change unless explicitly set) names ONE bucket that should
+    receive a symbol which matches no bucket at all. `_effective_bucket_
+    weight()` implements this: a symbol with an EXPLICIT weight in a
+    bucket (even via a glob pattern) always uses that explicit weight,
+    unchanged — the catch-all never adds to or overrides an explicit
+    mapping. Only a symbol matching zero buckets, zero patterns,
+    anywhere, falls back to weight 1.0 in `catch_all_bucket` alone; every
+    other bucket still correctly reports 0.0 for it.
+
+    `PROPOSED_MACRO_BUCKET_CONFIG.catch_all_bucket` is now set to
+    `"RISK_SENTIMENT_BETA"` — Martin's explicit, considered choice to
+    apply this GLOBALLY to both the already-live Bot 1 and the new Bot 2
+    S&P 500 instance (both read this same shared singleton — see
+    `aura_v05365_stage1b_scheduled_live_trader.py`'s
+    `macro_config=institutional_macro_buckets_module.PROPOSED_MACRO_
+    BUCKET_CONFIG` wiring, unconditional whenever `--enable-institutional-
+    gates` is passed, with no per-instance override). This is a disclosed,
+    intentional change to Bot 1's live risk-gate behavior, not an
+    oversight: a handful of Bot 1's existing pinned-universe symbols that
+    were previously exempt from the 0.20 stacking check will now be
+    subject to it, starting with the first deploy after this change.
+    `_effective_bucket_weight()` and `_symbol_matches_any_explicit_
+    bucket()` are both used by `compute_bucket_exposure()` (so the
+    portfolio-level dimension and every snapshot aggregate pick this up)
+    and by `evaluate_stacking_pretrade_direction()` (so the pre-trade
+    veto path picks it up too) — the same two call sites Martin's
+    directive named explicitly ("both portfolio snapshot aggregates and
+    pre-trade projections").
 """
 from __future__ import annotations
 
@@ -231,12 +274,14 @@ class MacroBucketConfig:
     bucket_membership: dict[str, dict[str, float]]
     max_bucket_exposure_ratio: float | None = None
     max_same_direction_stacking_ratio: float | None = None  # NOT YET enforced -- see module docstring.
+    catch_all_bucket: str | None = None  # ADDED 2026-10-10 -- see module docstring, "DYNAMIC CATCH-ALL MAPPING".
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "bucket_membership": {b: dict(w) for b, w in self.bucket_membership.items()},
             "max_bucket_exposure_ratio": self.max_bucket_exposure_ratio,
             "max_same_direction_stacking_ratio": self.max_same_direction_stacking_ratio,
+            "catch_all_bucket": self.catch_all_bucket,
         }
 
 
@@ -291,6 +336,14 @@ PROPOSED_MACRO_BUCKET_CONFIG = MacroBucketConfig(
         "COMMODITY_INFLATION": {"XOM": 1.0, "CVX": 1.0, "XLE": 1.0, "GLD": 1.0, "SLV": 1.0},
     },
     max_bucket_exposure_ratio=0.30,
+    # ADDED 2026-10-10 per Martin's explicit "GLOBAL RISK-GATE ENFORCEMENT
+    # PASS" directive -- applies to BOTH Bot 1 (already live) and Bot 2
+    # (S&P 500 expansion), since both read this same shared singleton.
+    # Any symbol matching no explicit bucket/pattern above falls back to
+    # RISK_SENTIMENT_BETA alone -- see module docstring, "DYNAMIC CATCH-
+    # ALL MAPPING", for the exact semantics and the disclosed Bot-1
+    # behavior-change consequence.
+    catch_all_bucket="RISK_SENTIMENT_BETA",
 )
 
 
@@ -311,6 +364,37 @@ def _bucket_weight_for_symbol(symbol: str, membership: dict[str, float]) -> floa
         if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(symbol, pattern):
             total += weight
     return total
+
+
+def _symbol_matches_any_explicit_bucket(symbol: str, config: MacroBucketConfig) -> bool:
+    """True if `symbol` has a nonzero EXPLICIT weight (exact or glob
+    match, per `_bucket_weight_for_symbol`) in at least one bucket of
+    `config.bucket_membership` -- never consults `catch_all_bucket`
+    itself, so this is safe to call from `_effective_bucket_weight()`
+    without circularity."""
+    return any(
+        _bucket_weight_for_symbol(symbol, membership) != 0.0
+        for membership in config.bucket_membership.values()
+    )
+
+
+def _effective_bucket_weight(symbol: str, bucket_name: str, config: MacroBucketConfig) -> float:
+    """Like `_bucket_weight_for_symbol`, but also applies
+    `config.catch_all_bucket` -- see module docstring, "DYNAMIC CATCH-ALL
+    MAPPING". An explicit weight for `symbol` in `bucket_name` (exact or
+    glob match) always wins, unchanged. Only when `symbol` matches NO
+    bucket at all, anywhere in `config.bucket_membership`, does it fall
+    back to weight 1.0 in `bucket_name` -- and only if `bucket_name IS
+    config.catch_all_bucket`. Every other bucket still correctly reports
+    0.0 for a caught-all symbol."""
+    explicit = _bucket_weight_for_symbol(symbol, config.bucket_membership.get(bucket_name, {}))
+    if explicit != 0.0:
+        return explicit
+    if config.catch_all_bucket is None or bucket_name != config.catch_all_bucket:
+        return 0.0
+    if _symbol_matches_any_explicit_bucket(symbol, config):
+        return 0.0  # caught by some OTHER bucket explicitly -- not a catch-all case for this one.
+    return 1.0
 
 
 def compute_bucket_exposure(
@@ -339,14 +423,18 @@ def compute_bucket_exposure(
     when it is not (same `NOT_COMPUTABLE`-worthy condition as
     `exposure_ratio`)."""
     out: dict[str, dict[str, Any]] = {}
-    for bucket_name, membership in config.bucket_membership.items():
+    for bucket_name in config.bucket_membership:
         net = 0.0
         gross = 0.0
         long_stack = 0.0
         short_stack = 0.0
         excluded_no_notional = 0
         for p in snapshot.positions:
-            weight = _bucket_weight_for_symbol(p.symbol, membership)
+            # Uses the catch-all-aware weight (see module docstring,
+            # "DYNAMIC CATCH-ALL MAPPING") so a symbol matching no
+            # explicit bucket/pattern still contributes to
+            # `config.catch_all_bucket` when one is configured.
+            weight = _effective_bucket_weight(p.symbol, bucket_name, config)
             if weight == 0.0:
                 continue
             if p.notional_usd is None:
@@ -498,8 +586,13 @@ def evaluate_stacking_pretrade_direction(
         ratio_key, notional_key, direction_label = "short_stacking_ratio", "short_stacking_notional_usd", "SHORT"
 
     out: list[DimensionVerdict] = []
-    for bucket_name, membership in config.bucket_membership.items():
-        if _bucket_weight_for_symbol(symbol, membership) == 0.0:
+    for bucket_name in config.bucket_membership:
+        # Catch-all-aware (see module docstring, "DYNAMIC CATCH-ALL
+        # MAPPING") -- a symbol matching no explicit bucket/pattern is
+        # still evaluated here when `config.catch_all_bucket` names this
+        # bucket, so the pre-trade veto sees exactly what the portfolio-
+        # level dimension/`compute_bucket_exposure()` already sees.
+        if _effective_bucket_weight(symbol, bucket_name, config) == 0.0:
             continue
         result = exposures[bucket_name]
         stack_ratio = result[ratio_key]

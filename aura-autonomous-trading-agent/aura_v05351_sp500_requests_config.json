@@ -1,0 +1,2277 @@
+[
+  {
+    "symbol": "A",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AAPL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ABBV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ABNB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ABT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ACGL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ACN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ADBE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ADI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ADM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ADP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ADSK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AEE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AEP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AFL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AIG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AIZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AJG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AKAM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ALL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ALLE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMAT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMCR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AME",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMGN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AMZN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ANET",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AON",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "APA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "APD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "APH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "APO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "APP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ARES",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ATO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AVGO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AVY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AWK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AXON",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AXP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "AZO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BAC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BALL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BAX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BBY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BDX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BEN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BIIB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BKNG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BKR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BLK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BMY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BNY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BRK.B",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BRO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BSX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "BX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "C",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CAH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CARR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CASY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CAT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CBOE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CBRE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CCI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CCL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CDNS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CDW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CEG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CFG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CHD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CHRW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CHTR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CIEN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CINF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CMCSA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CME",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CMG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CMI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CMS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CNC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CNP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COHR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COIN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "COST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CPAY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CPRT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CRH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CRL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CRM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CRWD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CSCO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CSX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CTAS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CTSH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CVNA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CVS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "CVX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "D",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DAL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DASH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DDOG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DELL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DGX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DHI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DHR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DIS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DLR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DLTR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DOC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DOV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DOW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DRI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DTE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DUK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DVN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "DXCM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EBAY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ECL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ED",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EFX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EIX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ELV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EME",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EMR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EOG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EQIX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EQT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ES",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ESS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ETN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ETR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EVRG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EXC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EXE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EXPD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EXPE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "EXR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "F",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FANG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FAST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FCX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FDX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FERG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FFIV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FICO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FIS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FISV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FITB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FIX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FLEX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FOX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FOXA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FSLR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FTNT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "FTV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GDDY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GEHC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GEN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GEV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GILD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GIS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GLW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GNRC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GOOG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GOOGL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GPC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GPN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GRMN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "GWW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HAL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HAS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HBAN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HCA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HIG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HLT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HON",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HOOD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HPE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HPQ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HSY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HUBB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HUM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "HWM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IBKR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IBM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ICE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IDXX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IEX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IFF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "INCY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "INTC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "INTU",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "INVH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IQV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IRM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ISRG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ITW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "IVZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "J",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "JBHT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "JBL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "JCI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "JNJ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "JPM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KDP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KEY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KEYS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KHC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KIM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KKR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KLAC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KMB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KMI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "KVUE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "L",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LDOS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LEN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LHX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LII",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LIN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LITE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LLY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LMT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LNT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LOW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LRCX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LUV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LVS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LYB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "LYV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MAA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MAR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MAS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MCD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MCHP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MCK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MCO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MDLZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MDT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MET",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "META",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MLM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MMM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MNST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MPC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MPWR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MRK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MRNA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MRVL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MSCI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MSFT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MSI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MTB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MTD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "MU",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NDAQ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NDSN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NEE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NEM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NFLX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NKE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NOC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NOW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NRG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NSC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NTAP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NTRS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NUE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NVDA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NVR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NWS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NWSA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "NXPI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "O",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ODFL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "OKE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "OMC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ON",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ORCL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ORLY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "OTIS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "OXY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PANW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PAYX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PCAR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PCG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PEG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PEP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PFE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PFG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PGR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PHM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PKG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PLD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PLTR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PNC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PPG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PPL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PRU",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PSA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PSX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PTC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PWR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "PYPL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "QCOM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RCL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RDDT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "REG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "REGN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RJF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RMD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ROK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ROL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ROP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ROST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RSG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RTX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "RVTY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SBAC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SBUX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SCHW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SHW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SJM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SLB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SMCI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SNA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SNDK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SNPS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SOLV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SPG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SPGI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SRE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "STE",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "STLD",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "STT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "STX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "STZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SWK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SYF",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SYK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "SYY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "T",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TDG",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TDY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TEL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TER",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TFC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TGT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TJX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TKO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TMO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TMUS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TPL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TPR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TRGP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TRMB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TROW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TRV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TSCO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TSLA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TSN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TTWO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TXN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TXT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "TYL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "UAL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "UBER",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ULTA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "UNH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "UNP",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "UPS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "URI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "USB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "V",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VEEV",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VICI",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VLO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VLTO",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VMC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VRSK",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VRSN",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VRT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VRTX",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VTR",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VTRS",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "VZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WAB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WAT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WDAY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WDC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WEC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WELL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WFC",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WMB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WMT",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WRB",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WSM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WST",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WTW",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "WY",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "XEL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "XOM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "XYL",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "XYZ",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "YUM",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ZBH",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ZBRA",
+    "asset_class": "STOCK",
+    "quantity": null
+  },
+  {
+    "symbol": "ZTS",
+    "asset_class": "STOCK",
+    "quantity": null
+  }
+]
