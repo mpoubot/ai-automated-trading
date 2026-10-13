@@ -685,8 +685,10 @@ def run_stage1a_dry_run(
     called with NO client reports both venues `NOT_CONFIGURED`, and
     `NOT_CONFIGURED` is indeed not a *data-quality failure* -- but `.44`'s
     portfolio_heat/directional_exposure dimensions ALSO require a real
-    total-equity figure to compute a ratio at all (`asset_concentration`
-    is the only aggregate dimension with a flat-book carve-out). With no
+    total-equity figure to compute a ratio at all -- and since the
+    2026-10-13 re-basing, so does `asset_concentration`, which keeps only
+    a flat-book carve-out (no positions => nothing to be concentrated in)
+    and otherwise reports NOT_COMPUTABLE without equity. With no
     venue ever SUCCESS, `total_equity` is unknown, so both dimensions
     report `NOT_COMPUTABLE` and `.44` BLOCKs with `EXPOSURE_NOT_COMPUTABLE`
     -- unconditionally, even when `limits` leaves that dimension's numeric

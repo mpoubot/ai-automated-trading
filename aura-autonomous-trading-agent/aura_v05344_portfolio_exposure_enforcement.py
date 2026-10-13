@@ -462,12 +462,83 @@ def _check_asset_concentration(exposure_report: dict, snapshot, limits: Portfoli
     max_share = max(report["by_symbol"].values()) if report["by_symbol"] else 0.0
     if limits.max_asset_concentration_ratio is None:
         return DimensionVerdict(dimension="asset_concentration", venue=None, verdict=LIMIT_NOT_CONFIGURED, reason="NO_LIMIT_CONFIGURED",
-                                 evidence={"max_symbol_share": max_share, "by_symbol": report["by_symbol"]})
+                                 evidence={"max_symbol_share": max_share, "by_symbol": report["by_symbol"],
+                                           "basis": report.get("basis"), "evaluated": "CURRENT_STATE"})
     breached = max_share > limits.max_asset_concentration_ratio
     return DimensionVerdict(
         dimension="asset_concentration", venue=None, verdict=BLOCK if breached else PASS,
         reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
-        evidence={"max_symbol_share": max_share, "limit": limits.max_asset_concentration_ratio, "by_symbol": report["by_symbol"]},
+        evidence={"max_symbol_share": max_share, "limit": limits.max_asset_concentration_ratio,
+                  "by_symbol": report["by_symbol"], "basis": report.get("basis"), "evaluated": "CURRENT_STATE"},
+    )
+
+
+def _check_asset_concentration_projected(
+    before_report: dict, after_report: dict, snapshot, limits: PortfolioLimits,
+    affected_keys: frozenset[str],
+) -> DimensionVerdict:
+    """Projected, PER-SYMBOL asset concentration -- the hypothetical-trade
+    counterpart to `_check_asset_concentration`.
+
+    2026-10-13 (Martin, explicit decision). The current-state check above
+    blocks whenever ANY held symbol exceeds the cap, which vetoed every
+    incoming order for every unrelated symbol as long as one legacy
+    holding sat over the line: a standing portfolio veto, not a check on
+    the trade being proposed. This function judges only the symbols the
+    hypothetical trade actually touches (`affected_keys`), against the
+    PROJECTED post-trade shares from `.43`'s own
+    `project_post_trade_exposure()` -- no second exposure model is built
+    here, exactly as the module docstring requires.
+
+    A touched symbol blocks when its projected share exceeds the cap AND
+    either it was within the cap before (this trade causes the breach) or
+    its share rises (this trade worsens an existing breach). A trade that
+    leaves an already-breaching symbol no worse does not block -- a
+    reduction must never be gated by the breach it is reducing.
+
+    Fail-closed on data quality, same as every other aggregate dimension:
+    a failed venue, a non-COMPUTABLE projection (which now includes
+    missing equity -- see `.43.compute_asset_concentration`) or any
+    position excluded for want of a price is a BLOCK, never a pass. The
+    projected book always contains the hypothetical position, so there is
+    no flat-book case to disambiguate here."""
+    blocked = _aggregate_data_quality_block(snapshot)
+    if blocked is not None:
+        return DimensionVerdict(dimension="asset_concentration", venue=None, verdict=BLOCK, reason=blocked.reason, evidence=blocked.evidence)
+
+    report = after_report["asset_concentration"]
+    excluded = report.get("positions_excluded_no_notional", 0)
+    if report["status"] != "COMPUTABLE" or excluded:
+        return DimensionVerdict(dimension="asset_concentration", venue=None, verdict=BLOCK, reason="EXPOSURE_NOT_COMPUTABLE",
+                                 evidence={"upstream_status": report["status"], "upstream_reason": report.get("reason"),
+                                           "positions_excluded_no_notional": excluded, "evaluated": "PROJECTED"})
+
+    after_by = report["by_symbol"]
+    before_by = (before_report["asset_concentration"].get("by_symbol") or {})
+    max_share = max(after_by.values()) if after_by else 0.0
+
+    if limits.max_asset_concentration_ratio is None:
+        return DimensionVerdict(dimension="asset_concentration", venue=None, verdict=LIMIT_NOT_CONFIGURED, reason="NO_LIMIT_CONFIGURED",
+                                 evidence={"max_symbol_share": max_share, "by_symbol": after_by,
+                                           "basis": report.get("basis"), "evaluated": "PROJECTED"})
+
+    limit = limits.max_asset_concentration_ratio
+    offending: dict[str, dict[str, float]] = {}
+    for key in sorted(affected_keys):
+        after_share = after_by.get(key, 0.0)
+        if after_share <= limit:
+            continue
+        before_share = before_by.get(key, 0.0)
+        if before_share <= limit or after_share > before_share:
+            offending[key] = {"before": before_share, "after": after_share}
+
+    breached = bool(offending)
+    return DimensionVerdict(
+        dimension="asset_concentration", venue=None, verdict=BLOCK if breached else PASS,
+        reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
+        evidence={"max_symbol_share": max_share, "limit": limit, "by_symbol": after_by,
+                  "basis": report.get("basis"), "evaluated": "PROJECTED",
+                  "evaluated_symbols": sorted(affected_keys), "offending_symbols": offending},
     )
 
 
@@ -476,7 +547,11 @@ def _check_correlation_group_concentration(exposure_report: dict, snapshot, limi
     item 9 — optionwright / Alpacaruns). Reuses .43's own already-computed
     `asset_concentration.by_symbol` shares — this does not re-derive
     per-symbol exposure, only sums an existing number across a
-    caller-supplied group. Same data-quality gating as
+    caller-supplied group. Those shares became EQUITY-relative on
+    2026-10-13 (Martin's decision, for symmetry across the risk layer),
+    so `max_correlation_group_concentration_ratio` now means "this
+    group's combined share of equity", not "of the gross book". Any
+    value configured before that date must be re-chosen. Same data-quality gating as
     `_check_asset_concentration` (aggregate cross-venue dimension: a
     failed configured venue means the true group exposure cannot be
     proven, not that it's zero).
@@ -520,7 +595,8 @@ def _check_correlation_group_concentration(exposure_report: dict, snapshot, limi
             dimension="correlation_group_concentration", venue=None, verdict=BLOCK if breached else PASS,
             reason="LIMIT_BREACHED" if breached else "WITHIN_LIMIT",
             evidence={"group": group_name, "group_share": group_share,
-                      "limit": limits.max_correlation_group_concentration_ratio, "members": member_shares},
+                      "limit": limits.max_correlation_group_concentration_ratio, "members": member_shares,
+                      "basis": report.get("basis"), "evaluated": "CURRENT_STATE"},
         ))
     return out
 
@@ -792,11 +868,13 @@ def evaluate_hypothetical_trade(
     `project_post_trade_exposure()` for the projected numbers -- this
     module does not build a second position-aggregation model.
     Current-state-only dimensions unaffected by the hypothetical trade
-    (daily_loss, max_drawdown) are evaluated against the snapshot as it
-    actually is today; asset_concentration is likewise evaluated against
-    the current state only, since .43's own projection helper does not
-    include it (this module does not extend that helper -- see module
-    docstring point 2 on not expanding .43)."""
+    (daily_loss, max_drawdown, correlation_group_concentration) are
+    evaluated against the snapshot as it actually is today.
+    asset_concentration is, since 2026-10-13, evaluated against the
+    PROJECTED post-trade state and only for the symbols this trade
+    touches -- .43's own projection helper now carries that dimension, so
+    this is still .43's model, not a second one (module docstring point 2
+    on not expanding .43 is unaffected)."""
     now = now or datetime.now(timezone.utc)
     as_of = now.isoformat()
 
@@ -824,6 +902,15 @@ def evaluate_hypothetical_trade(
     pseudo_report_for_leverage = {"leverage_exposure": after["leverage_exposure"]}
     verdicts.extend(_check_leverage_exposure(pseudo_report_for_leverage, snapshot, limits))
 
+    # 2026-10-13: asset_concentration joins the PROJECTED group. `.43`'s
+    # project_post_trade_exposure() now carries it in before/after, so the
+    # gate can ask "does THIS trade push THIS symbol over the cap?"
+    # instead of "is any held symbol over the cap?" -- see
+    # _check_asset_concentration_projected for the full rationale.
+    affected_keys = frozenset(f"{h.venue}:{h.symbol}" for h in hypothetical_list)
+    verdicts.append(_check_asset_concentration_projected(
+        projection["before"], after, snapshot, limits, affected_keys))
+
     # 2026-10-07 Options Track O8 extension: net_portfolio_delta and
     # defined_risk_structure_max_loss are projectable the same way (.43's
     # project_post_trade_exposure() now returns both in before/after) --
@@ -849,11 +936,15 @@ def evaluate_hypothetical_trade(
                                           evidence={"positions": projected_cap["positions"], "cap": limits.mexc_leverage_cap}))
 
     # Current-state-only dimensions, unaffected by the hypothetical trade.
-    # correlation_group_concentration joins asset_concentration here for
-    # the same reason: .43's project_post_trade_exposure() helper does not
-    # extend to either, and this module does not build a second projection
-    # model on top of .43's (see module docstring point 2).
-    verdicts.append(_check_asset_concentration(current_report, snapshot, limits))
+    # 2026-10-13: asset_concentration LEFT this group -- it is now
+    # evaluated against the projection above, per symbol. Group
+    # concentration stays here: Martin's 2026-10-13 decision re-based it
+    # to equity (which it inherits automatically, since it reads .43's
+    # own asset_concentration.by_symbol) but did not move it to the
+    # projected state. It therefore remains a whole-portfolio veto, and
+    # would reintroduce the same "one holding blocks every symbol"
+    # deadlock if max_correlation_group_concentration_ratio is ever
+    # configured. Unconfigured (None) today, so inert.
     verdicts.extend(_check_correlation_group_concentration(current_report, snapshot, limits))
     verdicts.extend(_check_daily_loss(current_report, snapshot, limits))
     verdicts.extend(_check_max_drawdown(current_report, snapshot, limits))

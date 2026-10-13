@@ -505,13 +505,64 @@ def test_compute_portfolio_heat_not_computable_no_equity():
     assert result["status"] == "NOT_COMPUTABLE"
 
 
-def test_compute_asset_concentration_proportions_sum_to_one():
+def test_compute_asset_concentration_is_share_of_equity_not_of_book():
+    """2026-10-13 re-basing. Shares are |notional|/EQUITY and therefore do
+    NOT sum to 1.0 -- their sum is gross exposure over equity. The old
+    book-relative behavior (which made a 2-position book always report
+    0.50/0.50 and deadlocked `.44`'s gate) is what this replaces."""
     positions = [_pos(symbol="BTC_USDT", notional=3000.0), _pos(symbol="ETH_USDT", notional=1000.0)]
-    result = MOD.compute_asset_concentration(positions)
+    result = MOD.compute_asset_concentration(positions, 20000.0)
     assert result["status"] == "COMPUTABLE"
-    total_share = sum(result["by_symbol"].values())
-    assert abs(total_share - 1.0) < 1e-9
-    assert abs(result["by_symbol"]["MEXC:BTC_USDT"] - 0.75) < 1e-9
+    assert result["basis"] == "EQUITY"
+    assert result["equity_usd"] == 20000.0
+    assert abs(result["by_symbol"]["MEXC:BTC_USDT"] - 0.15) < 1e-9
+    assert abs(result["by_symbol"]["MEXC:ETH_USDT"] - 0.05) < 1e-9
+    assert abs(sum(result["by_symbol"].values()) - 0.20) < 1e-9
+
+
+def test_compute_asset_concentration_single_position_is_not_automatically_full_book():
+    """The deadlock in one line: under the old denominator a lone position
+    was always 1.00 and breached any sane cap. Under equity it is simply
+    its own size."""
+    result = MOD.compute_asset_concentration([_pos(symbol="BTC_USDT", notional=900.0)], 10000.0)
+    assert abs(result["by_symbol"]["MEXC:BTC_USDT"] - 0.09) < 1e-9
+
+
+def test_compute_asset_concentration_not_computable_without_equity():
+    """Fail-closed, matching portfolio_heat and directional_exposure --
+    `.44` turns NOT_COMPUTABLE into a BLOCK rather than falling back to
+    the old denominator."""
+    for equity in (None, 0.0, -1.0):
+        result = MOD.compute_asset_concentration([_pos(notional=1000.0)], equity)
+        assert result["status"] == "NOT_COMPUTABLE", equity
+        assert result["reason"] == "NO_VALID_EQUITY"
+        assert result["basis"] == "EQUITY"
+        assert result["by_symbol"] == {}
+
+
+def test_compute_asset_concentration_flags_unpriced_positions():
+    positions = [_pos(symbol="BTC_USDT", notional=1000.0), _pos(symbol="ETH_USDT", notional=None)]
+    result = MOD.compute_asset_concentration(positions, 10000.0)
+    assert result["status"] == "COMPUTABLE"
+    assert result["partial"] is True
+    assert result["positions_excluded_no_notional"] == 1
+
+
+def test_project_post_trade_exposure_carries_asset_concentration():
+    """2026-10-13: `.44`'s hypothetical-trade gate needs the projected
+    per-symbol shares, so the projection payload must carry the dimension
+    on both sides."""
+    snap = _snapshot_for_dimensions()  # total equity 14000 (MEXC 4000 + ALPACA 10000)
+    hypothetical = _pos(venue="ALPACA", symbol="MSFT", notional=1400.0)
+    proj = MOD.project_post_trade_exposure(snap, [], hypothetical)
+    for side in ("before", "after"):
+        assert "asset_concentration" in proj[side], side
+        assert proj[side]["asset_concentration"]["basis"] == "EQUITY"
+    assert "ALPACA:MSFT" not in proj["before"]["asset_concentration"]["by_symbol"]
+    assert abs(proj["after"]["asset_concentration"]["by_symbol"]["ALPACA:MSFT"] - 0.1) < 1e-9
+    # A symbol the trade does not touch keeps the share it already had.
+    assert (proj["after"]["asset_concentration"]["by_symbol"]["ALPACA:AAPL"]
+            == proj["before"]["asset_concentration"]["by_symbol"]["ALPACA:AAPL"])
 
 
 def test_compute_directional_exposure_net_long_short():

@@ -161,7 +161,10 @@ def test_asset_concentration_breach_blocks():
     assert decision.overall_verdict == "BLOCK"
     v = next(v for v in decision.dimension_verdicts if v.dimension == "asset_concentration")
     assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
-    assert v.evidence["max_symbol_share"] == 0.9
+    # 2026-10-13: shares are now |notional|/TOTAL EQUITY (MEXC 4000 +
+    # ALPACA 10000 = 14000), not |notional|/book. 9000/14000 = 0.643.
+    assert v.evidence["basis"] == "EQUITY"
+    assert abs(v.evidence["max_symbol_share"] - 9000.0 / 14000.0) < 1e-9
 
 
 def test_directional_exposure_breach_blocks():
@@ -509,22 +512,23 @@ def test_correlation_group_configured_without_ratio_is_limit_not_configured_per_
 
 def test_correlation_group_breach_blocks_even_though_no_single_symbol_breaches():
     """Neither BTC nor ETH alone exceeds a 50% single-symbol cap (each is
-    40%), but held together they are 80% of the book -- exactly the gap
-    audit item 9 exists to close."""
+    20% of equity), but held together they are 40% -- exactly the gap
+    audit item 9 exists to close. Shares and limits re-based to equity
+    2026-10-13; total equity is 20000 (MEXC 10000 + ALPACA 10000)."""
     positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=4000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=4000.0),
                  _pos(venue="MEXC", symbol="SOL_USDT", notional=2000.0)]
     snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=3))
     limits = ENF.PortfolioLimits(
         max_asset_concentration_ratio=0.5,  # each symbol individually passes this
         correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")},
-        max_correlation_group_concentration_ratio=0.5,
+        max_correlation_group_concentration_ratio=0.3,
     )
     decision = _evaluate(snap, limits)
     single_symbol = next(v for v in decision.dimension_verdicts if v.dimension == "asset_concentration")
     assert single_symbol.verdict == "PASS"
     group = _group_verdicts(decision, "majors")[0]
     assert group.verdict == "BLOCK" and group.reason == "LIMIT_BREACHED"
-    assert group.evidence["group_share"] == 0.8
+    assert abs(group.evidence["group_share"] - 0.4) < 1e-9
     assert decision.overall_verdict == "BLOCK"
 
 
@@ -548,7 +552,8 @@ def test_correlation_group_member_not_held_treated_as_zero_share_not_error():
     decision = _evaluate(snap, limits)
     group = _group_verdicts(decision, "majors")[0]
     assert group.verdict == "PASS"
-    assert group.evidence["group_share"] == 0.3
+    # Equity basis (2026-10-13): 3000 / 20000 total equity.
+    assert abs(group.evidence["group_share"] - 0.15) < 1e-9
     assert group.evidence["members"]["MEXC:XRP_USDT"] == 0.0
 
 
@@ -604,17 +609,20 @@ def test_correlation_group_unpriced_position_blocks_as_not_computable():
 
 
 def test_correlation_group_evaluated_in_hypothetical_trade_as_current_state_only():
-    """Matches asset_concentration's own documented behavior: current-state
-    only, unaffected by the hypothetical order under evaluation."""
+    """Group concentration stays current-state even in a hypothetical-trade
+    evaluation. NOTE (2026-10-13): asset_concentration no longer behaves
+    this way -- it moved to the projected, per-symbol check. Group
+    concentration did not, so it remains a whole-portfolio veto; this
+    test pins that asymmetry deliberately."""
     positions = [_pos(venue="MEXC", symbol="BTC_USDT", notional=8000.0), _pos(venue="MEXC", symbol="ETH_USDT", notional=2000.0)]
     snap = _snapshot(positions, mexc_status=_status("MEXC", equity=10000.0, positions_count=2))
     limits = ENF.PortfolioLimits(correlated_groups={"majors": ("MEXC:BTC_USDT", "MEXC:ETH_USDT")},
-                                  max_correlation_group_concentration_ratio=0.5)
+                                  max_correlation_group_concentration_ratio=0.3)
     hypothetical = _pos(venue="ALPACA", symbol="SPY", notional=100.0)
     decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, limits, max_snapshot_age_seconds=300, now=NOW)
     group = _group_verdicts(decision, "majors")[0]
-    assert group.verdict == "BLOCK"  # pre-existing 100% concentration in majors, untouched by the unrelated hypothetical
-    assert group.evidence["group_share"] == 1.0
+    assert group.verdict == "BLOCK"  # pre-existing 50%-of-equity concentration in majors, untouched by the unrelated hypothetical
+    assert abs(group.evidence["group_share"] - 0.5) < 1e-9  # equity basis: 10000 of 20000
 
 
 def test_correlation_group_participates_in_decision_hash():
@@ -880,3 +888,140 @@ def test_o8_dimensions_participate_in_decision_hash():
     d2 = _evaluate(snap, ENF.PortfolioLimits(max_portfolio_delta=1.0))
     assert d1.decision_hash != d2.decision_hash
     assert d1.overall_verdict == "ALLOW" and d2.overall_verdict == "BLOCK"
+
+
+# ===========================================================================
+# 2026-10-13 -- the concentration deadlock and its fix.
+#
+# Before this change `asset_concentration` was (a) a share of the gross
+# notional book, so any book with fewer than 1/limit positions breached by
+# construction, and (b) evaluated against the CURRENT state inside
+# `evaluate_hypothetical_trade`, so one offending holding vetoed every
+# incoming order for every unrelated symbol. Three live bots sat at zero
+# submitted orders across 51+ consecutive cycles because of it.
+# ===========================================================================
+
+
+def _conc_decision(decision):
+    return next(v for v in decision.dimension_verdicts if v.dimension == "asset_concentration")
+
+
+def _permissive(**overrides):
+    """Only the concentration limit is configured, so any BLOCK in these
+    tests is unambiguously this dimension's doing."""
+    base = {"max_asset_concentration_ratio": 0.10}
+    base.update(overrides)
+    return ENF.PortfolioLimits(**base)
+
+
+def test_legacy_oversized_holding_does_not_veto_an_unrelated_trade():
+    """THE regression test. SPY sits at 28.8% of equity against a 10% cap
+    -- an existing breach the proposed GS trade has nothing to do with.
+    GS itself lands at 1% of equity, so the trade is allowed. Under the
+    pre-2026-10-13 gate this returned BLOCK, every cycle, forever."""
+    held = [_pos(venue="ALPACA", symbol="SPY", notional=28786.0),
+            _pos(venue="ALPACA", symbol="NVDA", notional=9274.0)]
+    snap = _snapshot(held, alpaca_status=_status("ALPACA", equity=99927.0, positions_count=2),
+                     mexc_status=_status("MEXC", equity=0.0, positions_count=0))
+    hypothetical = _pos(venue="ALPACA", symbol="GS", notional=999.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, _permissive(),
+                                               max_snapshot_age_seconds=300, now=NOW)
+    v = _conc_decision(decision)
+    assert v.verdict == "PASS" and v.reason == "WITHIN_LIMIT"
+    assert v.evidence["evaluated"] == "PROJECTED"
+    assert v.evidence["evaluated_symbols"] == ["ALPACA:GS"]
+    assert v.evidence["offending_symbols"] == {}
+    # The untouched breach is still visible in the evidence -- not hidden,
+    # just not this trade's problem.
+    assert v.evidence["by_symbol"]["ALPACA:SPY"] > 0.10
+
+
+def test_trade_that_itself_breaches_the_cap_is_blocked():
+    """The gate must still do its job: a single order for 15% of equity
+    against a 10% cap is refused."""
+    snap = _snapshot([], alpaca_status=_status("ALPACA", equity=100000.0, positions_count=0),
+                     mexc_status=_status("MEXC", equity=0.0, positions_count=0))
+    hypothetical = _pos(venue="ALPACA", symbol="TSLA", notional=15000.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, _permissive(),
+                                               max_snapshot_age_seconds=300, now=NOW)
+    v = _conc_decision(decision)
+    assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
+    assert "ALPACA:TSLA" in v.evidence["offending_symbols"]
+    assert decision.overall_verdict == "BLOCK"
+
+
+def test_adding_to_an_already_breaching_symbol_is_blocked_as_worsening():
+    """SPY is already over the cap; buying more SPY makes it worse, so the
+    trade is refused even though the breach pre-dates it."""
+    held = [_pos(venue="ALPACA", symbol="SPY", notional=28786.0)]
+    snap = _snapshot(held, alpaca_status=_status("ALPACA", equity=99927.0, positions_count=1),
+                     mexc_status=_status("MEXC", equity=0.0, positions_count=0))
+    hypothetical = _pos(venue="ALPACA", symbol="SPY", notional=5000.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, _permissive(),
+                                               max_snapshot_age_seconds=300, now=NOW)
+    v = _conc_decision(decision)
+    assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
+    detail = v.evidence["offending_symbols"]["ALPACA:SPY"]
+    assert detail["after"] > detail["before"] > 0.10
+
+
+def test_breaching_symbol_left_no_worse_is_not_blocked():
+    """A trade that does not increase an already-breaching symbol's share
+    must not be gated by the breach it is not making worse. Exercised at
+    the unit level: `project_post_trade_exposure` overlays positions and
+    so can only ever add exposure, which means this branch is unreachable
+    through `evaluate_hypothetical_trade` today. It is the difference
+    between 'this trade caused it' and 'this trade happened near it', and
+    it is the whole reason the check is per-symbol."""
+    snap = _snapshot([_pos(venue="ALPACA", symbol="SPY", notional=1000.0)],
+                     alpaca_status=_status("ALPACA", equity=10000.0, positions_count=1))
+    before = {"asset_concentration": {"status": "COMPUTABLE", "basis": "EQUITY",
+                                      "by_symbol": {"ALPACA:SPY": 0.30}}}
+    after = {"asset_concentration": {"status": "COMPUTABLE", "basis": "EQUITY",
+                                     "by_symbol": {"ALPACA:SPY": 0.25}}}
+    v = ENF._check_asset_concentration_projected(before, after, snap, _permissive(),
+                                                 frozenset({"ALPACA:SPY"}))
+    assert v.verdict == "PASS"
+    assert v.evidence["offending_symbols"] == {}
+
+
+def test_missing_equity_blocks_fail_closed():
+    """Decision B (Martin, 2026-10-13): with no usable equity the shares
+    cannot be computed, and an uncomputable risk dimension is a BLOCK, not
+    a pass. A broker that stops reporting equity halts trading rather than
+    leaving the limit silently unenforced."""
+    held = [_pos(venue="ALPACA", symbol="SPY", notional=1000.0)]
+    snap = _snapshot(held, alpaca_status=_status("ALPACA", equity=None, positions_count=1),
+                     mexc_status=_status("MEXC", equity=None, positions_count=0))
+    hypothetical = _pos(venue="ALPACA", symbol="GS", notional=500.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical, _permissive(),
+                                               max_snapshot_age_seconds=300, now=NOW)
+    v = _conc_decision(decision)
+    assert v.verdict == "BLOCK" and v.reason == "EXPOSURE_NOT_COMPUTABLE"
+    assert v.evidence["upstream_reason"] == "NO_VALID_EQUITY"
+
+
+def test_unconfigured_limit_still_reports_not_configured_on_the_projected_path():
+    snap = _snapshot([], alpaca_status=_status("ALPACA", equity=100000.0, positions_count=0),
+                     mexc_status=_status("MEXC", equity=0.0, positions_count=0))
+    hypothetical = _pos(venue="ALPACA", symbol="GS", notional=50000.0)
+    decision = ENF.evaluate_hypothetical_trade(snap, _both_venue_history(), hypothetical,
+                                               ENF.PortfolioLimits(), max_snapshot_age_seconds=300, now=NOW)
+    v = _conc_decision(decision)
+    assert v.verdict == "LIMIT_NOT_CONFIGURED" and v.reason == "NO_LIMIT_CONFIGURED"
+    assert v.evidence["evaluated"] == "PROJECTED"
+
+
+def test_current_state_evaluation_still_vetoes_on_any_held_symbol():
+    """`evaluate_portfolio_enforcement` is a portfolio health report, not a
+    per-trade gate, so its concentration check is deliberately unchanged:
+    it still blocks when ANY held symbol is over the cap. Only the
+    hypothetical-trade path became per-symbol."""
+    held = [_pos(venue="ALPACA", symbol="SPY", notional=28786.0)]
+    snap = _snapshot(held, alpaca_status=_status("ALPACA", equity=99927.0, positions_count=1),
+                     mexc_status=_status("MEXC", equity=0.0, positions_count=0))
+    decision = _evaluate(snap, _permissive())
+    v = _conc_decision(decision)
+    assert v.verdict == "BLOCK" and v.reason == "LIMIT_BREACHED"
+    assert v.evidence["evaluated"] == "CURRENT_STATE"
+    assert v.evidence["basis"] == "EQUITY"

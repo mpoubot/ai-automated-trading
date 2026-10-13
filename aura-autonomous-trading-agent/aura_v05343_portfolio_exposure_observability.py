@@ -129,7 +129,11 @@ NOT_COMPUTABLE rather than producing a misleading value." Three statuses:
  4. portfolio_heat             COMPUTABLE (per venue with computable
                                notional; partial coverage is flagged, not
                                silently dropped) -- sum(|notional|)/equity.
- 5. asset_concentration        COMPUTABLE (same notional-coverage caveat).
+ 5. asset_concentration        COMPUTABLE (same notional-coverage caveat);
+                               |notional|/EQUITY per symbol since
+                               2026-10-13 -- see compute_asset_
+                               concentration for why it is no longer
+                               a share of the gross notional book.
  6. correlation                NOT_COMPUTABLE -- no continuously-updated
                                cross-symbol return history exists live.
  7. directional_exposure       COMPUTABLE -- net(LONG notional - SHORT
@@ -693,17 +697,39 @@ def compute_portfolio_heat(positions: list[PositionRecord], equity: float | None
     return result
 
 
-def compute_asset_concentration(positions: list[PositionRecord]) -> dict[str, Any]:
+def compute_asset_concentration(positions: list[PositionRecord], equity: float | None) -> dict[str, Any]:
+    """Each symbol's |notional| as a share of TOTAL ACCOUNT EQUITY.
+
+    2026-10-13 re-basing (Martin, explicit decision). This function
+    previously divided by the gross notional book
+    (`sum(abs(notional))`), which made the shares sum to 1.0 and the
+    maximum share at least 1/N for an N-position book. A configured
+    `max_asset_concentration_ratio` of 0.10 was therefore unsatisfiable
+    below ten positions -- a one-position book always reported 1.00 --
+    and `.44`'s gate vetoed every incoming order in every cycle. The
+    denominator is now equity, so 0.10 means what it reads as: at most
+    10% of equity in any single symbol. Shares no longer sum to 1.0;
+    their sum is gross exposure over equity (i.e. `portfolio_heat`).
+
+    `basis` is emitted on every return so a journal entry written before
+    this change (no `basis` key -> book-relative) is distinguishable
+    from one written after (`basis="EQUITY"`). Every other key keeps its
+    previous name, type and meaning.
+
+    Fail-closed on equity, matching `portfolio_heat` and
+    `directional_exposure`: with no usable equity the shares cannot be
+    computed at all, so this reports NOT_COMPUTABLE rather than falling
+    back to the old denominator, and `.44` turns that into a BLOCK."""
     priced = [p for p in positions if p.notional_usd is not None]
     excluded = len(positions) - len(priced)
-    total = sum(abs(p.notional_usd) for p in priced)
-    if total <= 0:
-        return {"status": "NOT_COMPUTABLE" if not priced else "COMPUTABLE", "by_symbol": {}, "positions_excluded_no_notional": excluded}
+    if equity is None or equity <= 0:
+        return {"status": "NOT_COMPUTABLE", "reason": "NO_VALID_EQUITY", "basis": "EQUITY",
+                "by_symbol": {}, "positions_excluded_no_notional": excluded}
     by_symbol: dict[str, float] = {}
     for p in priced:
         key = f"{p.venue}:{p.symbol}"
-        by_symbol[key] = by_symbol.get(key, 0.0) + abs(p.notional_usd) / total
-    result = {"status": "COMPUTABLE", "by_symbol": by_symbol}
+        by_symbol[key] = by_symbol.get(key, 0.0) + abs(p.notional_usd) / equity
+    result: dict[str, Any] = {"status": "COMPUTABLE", "basis": "EQUITY", "by_symbol": by_symbol, "equity_usd": equity}
     if excluded:
         result["partial"] = True
         result["positions_excluded_no_notional"] = excluded
@@ -917,7 +943,7 @@ def compute_exposure_dimensions(
     }
     total_equity = sum(e for e in equity_by_venue.values() if e is not None) or None
     report["portfolio_heat"] = compute_portfolio_heat(positions, total_equity)
-    report["asset_concentration"] = compute_asset_concentration(positions)
+    report["asset_concentration"] = compute_asset_concentration(positions, total_equity)
     report["directional_exposure"] = compute_directional_exposure(positions, total_equity)
     report["leverage_exposure"] = compute_leverage_exposure(positions, equity_by_venue)
     report["crypto_funding_basis_exposure"] = {"status": "SEE_fetch_mexc_funding_exposure", "reason": "requires a live per-symbol funding-rate call, not a pure function of the snapshot alone"}
@@ -959,12 +985,14 @@ def project_post_trade_exposure(
         "status": "COMPUTABLE",
         "before": {
             "portfolio_heat": before["portfolio_heat"], "directional_exposure": before["directional_exposure"],
+            "asset_concentration": before["asset_concentration"],
             "leverage_exposure": before["leverage_exposure"], "mexc_leverage_cap_check": before["mexc_leverage_cap_check"],
             "net_portfolio_delta": before["net_portfolio_delta"],
             "defined_risk_structure_max_loss": before["defined_risk_structure_max_loss"],
         },
         "after": {
             "portfolio_heat": after["portfolio_heat"], "directional_exposure": after["directional_exposure"],
+            "asset_concentration": after["asset_concentration"],
             "leverage_exposure": after["leverage_exposure"], "mexc_leverage_cap_check": after["mexc_leverage_cap_check"],
             "net_portfolio_delta": after["net_portfolio_delta"],
             "defined_risk_structure_max_loss": after["defined_risk_structure_max_loss"],
