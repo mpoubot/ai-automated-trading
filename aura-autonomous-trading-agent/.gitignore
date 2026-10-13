@@ -234,3 +234,15 @@ calibration_result.json
 track_b_90day_alpaca_backtest_*.json
 historical_bars/
 live_evidence_runs/
+
+# Per-bot Alpaca paper credentials (real secrets) -- template is
+# bot_credentials.example.bat, which IS committed. 2026-10-13.
+bot_credentials.bat
+secrets/
+
+# Per-bot cycle archives, written every ~5 minutes by .365. Same class as
+# regime_output/ above; bot 2 and bot 3 were simply never added when their
+# instances were. 2026-10-13.
+stage1b_live_trader_output_bot2_sp500/
+stage1b_live_trader_output_bot3_highrisk/
+stage1b_live_trader_news_state/
