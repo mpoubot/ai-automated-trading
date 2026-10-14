@@ -132,7 +132,7 @@ echo.
 REM --- Window 1: read-only live dashboard (.366) -- Bot 1's output dir only --
 REM UNCHANGED from before -- no explicit --server.port, so this keeps using
 REM whatever Streamlit's own default port is (8501) exactly as it always has.
-start "AURA Dashboard - Bot1 PinnedCore (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot1 && streamlit run aura_v05366_live_trader_dashboard.py -- --output-dir stage1b_live_trader_output"
+start "AURA Dashboard - Bot1 PinnedCore (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot1 && streamlit run aura_v05366_live_trader_dashboard.py -- --output-dir stage1b_live_trader_output --bot-label Bot1-PinnedCore"
 
 REM --- Window 1b: SECOND dashboard instance, Bot 2's output dir, port 5001 --
 REM Streamlit's own --server.port flag goes BEFORE the "--" separator;
@@ -142,13 +142,13 @@ REM paths (both default, inside .366 itself, to .365's Bot-1-shaped shared
 REM defaults -- same collision class already fixed for the trader windows
 REM below) so this dashboard reads Bot 2's real kill-switch/order-log state,
 REM not Bot 1's.
-start "AURA Dashboard - Bot2 SP500 (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot2 && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5001 -- --output-dir stage1b_live_trader_output_bot2_sp500 --kill-switch-file STOP_365_LIVE_TRADER_BOT2_SP500 --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot2_sp500.jsonl"
+start "AURA Dashboard - Bot2 SP500 (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot2 && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5001 -- --output-dir stage1b_live_trader_output_bot2_sp500 --kill-switch-file STOP_365_LIVE_TRADER_BOT2_SP500 --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot2_sp500.jsonl --bot-label Bot2-SP500"
 REM --- Window 1c: THIRD dashboard instance, Bot 3's output dir, port 5002 -
 REM Same pattern as Window 1b: Streamlit's own --server.port 5002 flag
 REM before the "--" separator, Bot-3-specific --output-dir/--kill-switch-
 REM file/--daily-order-log-path after it, so this dashboard reads Bot 3's
 REM real state only -- completely independent of Window 1 and Window 1b.
-start "AURA Dashboard - Bot3 HighRisk (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot3 && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5002 -- --output-dir stage1b_live_trader_output_bot3_highrisk --kill-switch-file STOP_365_LIVE_TRADER_BOT3_HIGHRISK --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot3_highrisk.jsonl"
+start "AURA Dashboard - Bot3 HighRisk (.366)" /D "%AURA_REPO%" cmd /k "call .venv\Scripts\activate.bat && call bot_credentials.bat bot3 && streamlit run aura_v05366_live_trader_dashboard.py --server.port 5002 -- --output-dir stage1b_live_trader_output_bot3_highrisk --kill-switch-file STOP_365_LIVE_TRADER_BOT3_HIGHRISK --daily-order-log-path regime_output\live_trader_order_log\stage1b_daily_order_log_bot3_highrisk.jsonl --bot-label Bot3-HighRisk-R2000"
 
 
 REM --- Window 2: Bot 1 / Pinned Core -- primary Alpaca account, UNCHANGED ----

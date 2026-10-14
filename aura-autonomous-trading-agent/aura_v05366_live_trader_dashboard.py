@@ -147,6 +147,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--daily-order-log-path", type=Path, default=live_trader_module.DEFAULT_DAILY_ORDER_LOG_PATH,
                          help=f"Default: {live_trader_module.DEFAULT_DAILY_ORDER_LOG_PATH}")
     parser.add_argument("--max-orders-per-day", type=int, default=live_trader_module.DEFAULT_MAX_ORDERS_PER_DAY)
+    parser.add_argument("--bot-label", type=str, default=None,
+                         help="Short name for the bot this dashboard is watching, e.g. "
+                              "\"Bot 1 - Pinned Core\". Shown in the browser tab title and the "
+                              "page heading. Three instances of this module otherwise render "
+                              "identical titles, which makes three open tabs indistinguishable "
+                              "until you read the equity figure. Omitted -> the original "
+                              "unlabelled title, unchanged.")
     # Streamlit re-invokes this script itself; ignore anything it injects
     # that we don't recognise instead of crashing the app on it.
     known, _unknown = parser.parse_known_args(argv)
@@ -578,10 +585,16 @@ def main() -> None:
     args = parse_args(sys.argv[1:])
     live_trader_module = load_live_trader_module()
 
-    st.set_page_config(page_title="AURA Track B -- Stage 3B Live Trading Monitor", layout="wide")
+    # The tab title is what actually disambiguates three open dashboards, so
+    # the label leads there; the heading keeps the full module name after it.
+    label = (args.bot_label or "").strip()
+    page_title = f"{label} -- AURA Track B" if label else "AURA Track B -- Stage 3B Live Trading Monitor"
+    heading = f"{label} — AURA Track B, Stage 3B Live Trading Monitor" if label else "AURA Track B — Stage 3B Live Trading Monitor"
+
+    st.set_page_config(page_title=page_title, layout="wide")
     inject_css()
 
-    st.title("AURA Track B — Stage 3B Live Trading Monitor")
+    st.title(heading)
     st.caption("aura_v05366_live_trader_dashboard.py — reads .365's cycle output AND makes real, read-only "
                "Alpaca calls (account equity, positions, market clock). No order-submission code here.")
 
