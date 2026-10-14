@@ -479,10 +479,22 @@ def run_cycle(
             attempt_submission=attempt_submission,
             **(supervision_kwargs or {}),
         )
+        # 2026-10-14: carry `.38`'s own exception text through, instead of
+        # only its classification. `.38` wraps its call to `.35.submit()`
+        # and records the exception in submission_result["error"] -- but
+        # until now nothing downstream kept it, so an EXECUTION_UNCERTAIN
+        # looked identical whether the broker refused the order outright or
+        # the connection timed out. Five failed submissions on 2026-10-13
+        # left no diagnosable record anywhere; the cause (an account-level
+        # trade suspension) had to be found by probing the broker directly.
+        submission_error = ((result or {}).get("submission_result") or {}).get("error")
+        submission_reasons = [f"supervisor status={result.get('status')}"]
+        if submission_error:
+            submission_reasons.append(f"submission error: {submission_error}")
         outcomes.append(
             SymbolCycleOutcome(
                 symbol=symbol, stage="SUBMITTED_FOR_EXECUTION", decision=decision, supervision_result=result,
-                reasons=(f"supervisor status={result.get('status')}",),
+                reasons=tuple(submission_reasons),
             )
         )
 
@@ -537,6 +549,11 @@ def _cycle_result_to_dict(result: CycleResult) -> dict[str, Any]:
                 "decision_outcome": getattr(o.decision, "outcome", None),
                 "decision_hash": getattr(o.decision, "decision_hash", None),
                 "supervision_status": (o.supervision_result or {}).get("status"),
+                # Additive, 2026-10-14. None on every outcome that did not
+                # attempt a submission, and on every submission that raised
+                # nothing -- so an absent/null value means "no error", never
+                # "error not recorded".
+                "submission_error": ((o.supervision_result or {}).get("submission_result") or {}).get("error"),
                 "reasons": list(o.reasons),
             }
             for o in result.outcomes

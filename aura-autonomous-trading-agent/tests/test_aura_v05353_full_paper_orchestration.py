@@ -513,3 +513,61 @@ def test_module_never_builds_a_close_direction():
         and node.value in ("CLOSE_LONG", "CLOSE_SHORT")
     ]
     assert not offenders, f"unexpected CLOSE_* direction literal(s) in code (not docstring): {offenders}"
+
+
+# ============================================================================
+# 11. Submission-error passthrough (2026-10-14)
+#
+# `.38` wraps its own call to `.35.submit()` and records the exception text in
+# submission_result["error"], but until this change nothing downstream kept
+# it: an EXECUTION_UNCERTAIN looked the same whether the broker refused the
+# order outright or the connection timed out. Five failed submissions on
+# 2026-10-13 left no diagnosable record; the cause (an account-level trade
+# suspension) had to be found by querying the broker directly.
+# ============================================================================
+
+
+def _outcome_with_submission(result_dict):
+    return M.SymbolCycleOutcome(
+        symbol="AAA", stage="SUBMITTED_FOR_EXECUTION", decision=None,
+        supervision_result=result_dict,
+        reasons=(f"supervisor status={(result_dict or {}).get('status')}",),
+    )
+
+
+def _cycle_with(outcome):
+    return M.CycleResult(
+        cycle_id="C1", started_at=NOW.isoformat(), finished_at=NOW.isoformat(),
+        max_new_orders_per_cycle=1, attempt_submission=True, outcomes=(outcome,),
+    )
+
+
+def test_submission_error_is_persisted_in_the_cycle_payload():
+    supervision = {
+        "status": "EXECUTION_UNCERTAIN",
+        "submission_result": {
+            "status": "EXECUTION_UNCERTAIN",
+            "error": "APIError: account is not permitted to trade",
+        },
+    }
+    payload = M._cycle_result_to_dict(_cycle_with(_outcome_with_submission(supervision)))
+    assert payload["outcomes"][0]["submission_error"] == "APIError: account is not permitted to trade"
+    assert payload["outcomes"][0]["supervision_status"] == "EXECUTION_UNCERTAIN"
+
+
+def test_submission_error_is_none_on_a_clean_submission():
+    """Absent/None means 'no error', never 'error not recorded' -- so the key
+    being null is itself informative."""
+    supervision = {"status": "SUBMITTED", "submission_result": {"status": "SUBMITTED", "broker_order_id": "x"}}
+    payload = M._cycle_result_to_dict(_cycle_with(_outcome_with_submission(supervision)))
+    assert payload["outcomes"][0]["submission_error"] is None
+
+
+def test_submission_error_is_none_on_an_outcome_that_never_submitted():
+    outcome = M.SymbolCycleOutcome(
+        symbol="BBB", stage="DEFERRED_CYCLE_CAP", decision=None, supervision_result=None,
+        reasons=("cycle cap reached (max_new_orders_per_cycle=1)",),
+    )
+    payload = M._cycle_result_to_dict(_cycle_with(outcome))
+    assert payload["outcomes"][0]["submission_error"] is None
+    assert payload["outcomes"][0]["supervision_status"] is None
