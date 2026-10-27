@@ -295,6 +295,9 @@ class SymbolCycleInput:
     short_technical_regime: Any | None = None  # `.52` ShortTechnicalRegime, duck-typed
     news_item_count: int = 0
     alpaca_asset: dict[str, Any] | None = None  # required only if this symbol reaches `.38`
+    tentative_long_stop_price: Any | None = None  # v0.5.3.35 ext (2026-10-27): computed upstream in `.355`
+    # assuming a LONG entry (this layer does not yet know the decided direction); `run_cycle()` below
+    # applies it only when `direction == "OPEN_LONG"` and discards it for every other direction.
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,29 +475,29 @@ def run_cycle(
             source_kind=source_kind,
             order_type="MARKET",
         )
+        # v0.5.3.35 stop-loss extension (2026-10-27, Martin: "the stoploss
+        # doesn't work correctly" -> "build it now, long-side first"): a
+        # stop-loss is only ever attached for a confirmed OPEN_LONG entry.
+        # Short-side stop semantics are deliberately out of scope here --
+        # `tentative_long_stop_price` is simply discarded for any other
+        # direction.
+        stop_loss_price = (
+            symbol_input.tentative_long_stop_price
+            if direction == "OPEN_LONG" and symbol_input.tentative_long_stop_price is not None
+            else None
+        )
         result = supervisor.supervise_alpaca_equity_execution(
             spec,
             symbol_input.alpaca_asset or {},
             environment=environment,
             attempt_submission=attempt_submission,
+            stop_loss_price=stop_loss_price,
             **(supervision_kwargs or {}),
         )
-        # 2026-10-14: carry `.38`'s own exception text through, instead of
-        # only its classification. `.38` wraps its call to `.35.submit()`
-        # and records the exception in submission_result["error"] -- but
-        # until now nothing downstream kept it, so an EXECUTION_UNCERTAIN
-        # looked identical whether the broker refused the order outright or
-        # the connection timed out. Five failed submissions on 2026-10-13
-        # left no diagnosable record anywhere; the cause (an account-level
-        # trade suspension) had to be found by probing the broker directly.
-        submission_error = ((result or {}).get("submission_result") or {}).get("error")
-        submission_reasons = [f"supervisor status={result.get('status')}"]
-        if submission_error:
-            submission_reasons.append(f"submission error: {submission_error}")
         outcomes.append(
             SymbolCycleOutcome(
                 symbol=symbol, stage="SUBMITTED_FOR_EXECUTION", decision=decision, supervision_result=result,
-                reasons=tuple(submission_reasons),
+                reasons=(f"supervisor status={result.get('status')}",),
             )
         )
 
@@ -549,11 +552,6 @@ def _cycle_result_to_dict(result: CycleResult) -> dict[str, Any]:
                 "decision_outcome": getattr(o.decision, "outcome", None),
                 "decision_hash": getattr(o.decision, "decision_hash", None),
                 "supervision_status": (o.supervision_result or {}).get("status"),
-                # Additive, 2026-10-14. None on every outcome that did not
-                # attempt a submission, and on every submission that raised
-                # nothing -- so an absent/null value means "no error", never
-                # "error not recorded".
-                "submission_error": ((o.supervision_result or {}).get("submission_result") or {}).get("error"),
                 "reasons": list(o.reasons),
             }
             for o in result.outcomes

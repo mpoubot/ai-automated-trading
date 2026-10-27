@@ -430,41 +430,46 @@ def test_fetch_symbol_evidence_atr_none_when_insufficient_bars_for_warmup():
 def test_resolve_quantity_explicit_quantity_always_wins():
     req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=42)
     ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
-    quantity, error = M.resolve_quantity_for_symbol(
+    quantity, planned_stop_distance, error = M.resolve_quantity_for_symbol(
         req, ev, account_equity_usd=None, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
     )
     assert quantity == 42
+    # Manual override: no ATR-based stop distance was computed for it.
+    assert planned_stop_distance is None
     assert error is None
 
 
 def test_resolve_quantity_auto_sizes_from_real_equity_and_atr():
     req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
     ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
-    quantity, error = M.resolve_quantity_for_symbol(
+    quantity, planned_stop_distance, error = M.resolve_quantity_for_symbol(
         req, ev, account_equity_usd=100_000.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
     )
     assert error is None
     # risk_capital = 100_000 * 0.005 = 500; planned_stop_distance = 2.0 * 2.0 = 4.0; quantity = floor(500/4.0) = 125
     assert quantity == 125
+    assert planned_stop_distance == 4.0
 
 
 def test_resolve_quantity_fails_open_no_equity():
     req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
     ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=2.0)
-    quantity, error = M.resolve_quantity_for_symbol(
+    quantity, planned_stop_distance, error = M.resolve_quantity_for_symbol(
         req, ev, account_equity_usd=None, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
     )
     assert quantity is None
+    assert planned_stop_distance is None
     assert error == "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
 
 
 def test_resolve_quantity_fails_open_no_atr():
     req = M.LiveSymbolRequest(symbol="AAPL", asset_class="STOCK", quantity=None)
     ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=None)
-    quantity, error = M.resolve_quantity_for_symbol(
+    quantity, planned_stop_distance, error = M.resolve_quantity_for_symbol(
         req, ev, account_equity_usd=100_000.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
     )
     assert quantity is None
+    assert planned_stop_distance is None
     assert error == "NO_USABLE_ATR_FOR_SIZING"
 
 
@@ -476,10 +481,11 @@ def test_resolve_quantity_fails_open_zero_shares():
     # (100.0), so this does not trip exit_engine's DEGENERATE_STOP_DISTANCE
     # guard -- it's a genuine "risk budget too small" case, not a bad input.
     ev = M.SymbolEvidence(symbol="AAPL", technical_regime=None, short_technical_regime=None, last_close=100.0, atr_at_entry=1.0)
-    quantity, error = M.resolve_quantity_for_symbol(
+    quantity, planned_stop_distance, error = M.resolve_quantity_for_symbol(
         req, ev, account_equity_usd=1.0, exit_engine_module=EXIT54, position_sizing_module=SIZING54,
     )
     assert quantity is None
+    assert planned_stop_distance is None
     assert error == "SIZING_ROUNDED_TO_ZERO_SHARES"
 
 

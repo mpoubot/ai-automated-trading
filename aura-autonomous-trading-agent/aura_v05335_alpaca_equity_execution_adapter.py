@@ -143,8 +143,8 @@ from pathlib import Path
 from typing import Any
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, PositionIntent, TimeInForce
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, StopLossRequest
 
 VERSION = "AURA v0.5.3.35"
 ENGINE = "ALPACA_EQUITY_EXECUTION_ADAPTER"
@@ -383,7 +383,9 @@ def validate_equity_spec(
 # object, no network call.
 # --------------------------------------------------------------------- #
 
-def build_order_request_spec(spec: dict[str, Any], alpaca_asset: dict[str, Any]) -> dict[str, Any]:
+def build_order_request_spec(
+    spec: dict[str, Any], alpaca_asset: dict[str, Any], *, stop_loss_price: Any | None = None,
+) -> dict[str, Any]:
     validated = validate_equity_spec(spec, alpaca_asset)
     direction = validated["direction"]
     side_str, position_intent_str = DIRECTION_TO_SIDE_POSITION_INTENT_STR[direction]
@@ -406,6 +408,19 @@ def build_order_request_spec(spec: dict[str, Any], alpaca_asset: dict[str, Any])
     }
     if spec.get("order_type") == "LIMIT":
         order_spec["limit_price"] = spec["limit_price"]
+    # v0.5.3.35 stop-loss extension (2026-10-27, Martin: "the stoploss
+    # doesn't work correctly" -> "build it now, long-side first"). A
+    # stop-loss is attached ONLY for a confirmed OPEN_LONG entry -- this
+    # fails closed (never silently drops the stop) if a caller somehow
+    # passes stop_loss_price for any other direction, since short-side
+    # stop semantics have never been exercised live in this codebase and
+    # are deliberately out of scope here.
+    if stop_loss_price is not None:
+        if direction != "OPEN_LONG":
+            fail(f"STOP_LOSS_PRICE_ONLY_SUPPORTED_FOR_OPEN_LONG:{direction}")
+        stop_decimal = _decimal(stop_loss_price, "stop_loss_price")
+        order_spec["stop_loss_price"] = str(stop_decimal)
+        order_spec["order_class"] = "OTO"
     return order_spec
 
 
@@ -430,6 +445,15 @@ def to_alpaca_order_request(order_spec: dict[str, Any]):
         client_order_id=order_spec["client_order_id"],
         position_intent=position_intent,
     )
+    # v0.5.3.35 stop-loss extension: an OTO bracket -- the primary leg
+    # above plus a server-side stop-loss leg that Alpaca attaches and
+    # manages itself, so the stop survives even if this process is
+    # offline when the price hits it. build_order_request_spec() already
+    # fails closed if this was ever set for a non-OPEN_LONG direction, so
+    # no direction check is repeated here.
+    if order_spec.get("stop_loss_price"):
+        common["order_class"] = OrderClass.OTO
+        common["stop_loss"] = StopLossRequest(stop_price=_decimal(order_spec["stop_loss_price"], "stop_loss_price"))
     if order_spec["order_type"] == "MARKET":
         return MarketOrderRequest(**common)
     limit_price = _decimal(order_spec.get("limit_price"), "limit_price")

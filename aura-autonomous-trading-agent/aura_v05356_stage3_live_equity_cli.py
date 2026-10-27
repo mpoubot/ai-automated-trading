@@ -611,22 +611,30 @@ def resolve_quantity_for_symbol(
     account_equity_usd: float | None,
     exit_engine_module: Any,
     position_sizing_module: Any,
-) -> tuple[Any, str | None]:
-    """Returns `(quantity, sizing_error)`. If `request.quantity` is
-    explicitly supplied, it always wins (manual override, unchanged
-    behavior). Otherwise computes it via ATR risk sizing. On any
-    precondition failure (no real equity fetched, no usable ATR) or a
-    computed size of zero shares, returns `(None, <reason>)` -- the
-    caller skips this symbol for the cycle rather than submitting a
-    fabricated or zero-size request (Martin, 2026-09-25)."""
+) -> tuple[Any, Any, str | None]:
+    """Returns `(quantity, planned_stop_distance, sizing_error)`. If
+    `request.quantity` is explicitly supplied, it always wins (manual
+    override, unchanged behavior) -- `planned_stop_distance` is then
+    `None` since no ATR-based stop was computed for it, so a manually-
+    sized request is submitted without an attached stop, exactly as
+    before this extension. Otherwise computes quantity via ATR risk
+    sizing AND returns the same ATR-derived stop distance the sizing math
+    already used, so a caller can attach a real stop-loss order at the
+    exact distance the position was sized against instead of silently
+    discarding it (Martin, 2026-10-27: "the stoploss doesn't work
+    correctly" -> "build it now, long-side first"). On any precondition
+    failure (no real equity fetched, no usable ATR) or a computed size of
+    zero shares, returns `(None, None, <reason>)` -- the caller skips
+    this symbol for the cycle rather than submitting a fabricated or
+    zero-size request (Martin, 2026-09-25)."""
     if request.quantity is not None:
-        return request.quantity, None
+        return request.quantity, None, None
     if account_equity_usd is None:
-        return None, "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
+        return None, None, "NO_REAL_ACCOUNT_EQUITY_AVAILABLE_FOR_SIZING"
     if evidence.last_close is None:
-        return None, "NO_REFERENCE_PRICE_AVAILABLE_FOR_SIZING"
+        return None, None, "NO_REFERENCE_PRICE_AVAILABLE_FOR_SIZING"
     if evidence.atr_at_entry is None:
-        return None, "NO_USABLE_ATR_FOR_SIZING"
+        return None, None, "NO_USABLE_ATR_FOR_SIZING"
     try:
         planned_stop_distance = exit_engine_module.initial_stop_distance_long(
             entry_price=evidence.last_close, atr_at_entry=evidence.atr_at_entry,
@@ -636,10 +644,10 @@ def resolve_quantity_for_symbol(
             planned_stop_distance=planned_stop_distance,
         )
     except (exit_engine_module.ExitEngineError, position_sizing_module.PositionSizingError) as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, None, f"{type(exc).__name__}: {exc}"
     if sizing_result.quantity <= 0:
-        return None, "SIZING_ROUNDED_TO_ZERO_SHARES"
-    return sizing_result.quantity, None
+        return None, None, "SIZING_ROUNDED_TO_ZERO_SHARES"
+    return sizing_result.quantity, planned_stop_distance, None
 
 
 def build_reference_price_fn(evidence_by_symbol: dict[str, SymbolEvidence]) -> Callable[[str], float]:
@@ -764,10 +772,11 @@ def run_live_dry_run_cycle(
     # ATR risk-based position sizing"). A symbol that cannot be sized this
     # cycle is skipped for this cycle only, recorded, never blocks others.
     resolved_quantity_by_symbol: dict[str, Any] = {}
+    resolved_stop_distance_by_symbol: dict[str, Any] = {}
     sizing_failures: list[dict[str, Any]] = []
     sizeable_requests = []
     for r in usable_requests:
-        quantity, sizing_error = resolve_quantity_for_symbol(
+        quantity, planned_stop_distance, sizing_error = resolve_quantity_for_symbol(
             r, evidence_by_symbol[r.symbol], account_equity_usd=account_equity_usd,
             exit_engine_module=exit_engine_module, position_sizing_module=position_sizing_module,
         )
@@ -775,6 +784,7 @@ def run_live_dry_run_cycle(
             sizing_failures.append({"symbol": r.symbol, "error": sizing_error})
             continue
         resolved_quantity_by_symbol[r.symbol] = quantity
+        resolved_stop_distance_by_symbol[r.symbol] = planned_stop_distance
         sizeable_requests.append(r)
 
     stage1_symbol_requests = tuple(
@@ -784,6 +794,7 @@ def run_live_dry_run_cycle(
             short_technical_regime=evidence_by_symbol[r.symbol].short_technical_regime,
             sentiment_regime=getattr(live_evidence_by_symbol.get(r.symbol), "sentiment_regime", None),
             wave_result=getattr(live_evidence_by_symbol.get(r.symbol), "wave_result", None),
+            planned_stop_distance=resolved_stop_distance_by_symbol[r.symbol],
         )
         for r in sizeable_requests
     )

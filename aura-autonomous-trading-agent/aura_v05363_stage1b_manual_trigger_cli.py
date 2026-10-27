@@ -490,10 +490,11 @@ def run_manual_trigger_stage1b_cycle(
     reference_price_fn = equity_cli.build_reference_price_fn(evidence_by_symbol)
 
     resolved_quantity_by_symbol: dict[str, Any] = {}
+    resolved_stop_distance_by_symbol: dict[str, Any] = {}
     sizing_failures: list[dict[str, Any]] = []
     sizeable_requests = []
     for r in usable_requests:
-        quantity, sizing_error = equity_cli.resolve_quantity_for_symbol(
+        quantity, planned_stop_distance, sizing_error = equity_cli.resolve_quantity_for_symbol(
             r, evidence_by_symbol[r.symbol], account_equity_usd=account_equity_usd,
             exit_engine_module=exit_engine_module, position_sizing_module=position_sizing_module,
         )
@@ -501,6 +502,7 @@ def run_manual_trigger_stage1b_cycle(
             sizing_failures.append({"symbol": r.symbol, "error": sizing_error})
             continue
         resolved_quantity_by_symbol[r.symbol] = quantity
+        resolved_stop_distance_by_symbol[r.symbol] = planned_stop_distance
         sizeable_requests.append(r)
 
     stage1_symbol_requests = tuple(
@@ -510,6 +512,7 @@ def run_manual_trigger_stage1b_cycle(
             short_technical_regime=evidence_by_symbol[r.symbol].short_technical_regime,
             sentiment_regime=getattr(live_evidence_by_symbol.get(r.symbol), "sentiment_regime", None),
             wave_result=getattr(live_evidence_by_symbol.get(r.symbol), "wave_result", None),
+            planned_stop_distance=resolved_stop_distance_by_symbol[r.symbol],
         )
         for r in sizeable_requests
     )

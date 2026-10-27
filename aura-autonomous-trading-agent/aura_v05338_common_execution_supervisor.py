@@ -681,6 +681,7 @@ def supervise_alpaca_equity_execution(
     max_price_drift_bps: float | None = None,
     max_revalidation_to_submission_seconds: float | None = None,
     audit_dir: Path | None = None,
+    stop_loss_price: Any | None = None,
 ) -> dict[str, Any]:
     """The single entry point for a NEW Alpaca STOCK/ETF execution
     decision. Sequence: canonical spec self-consistency -> venue/asset-
@@ -789,6 +790,7 @@ def supervise_alpaca_equity_execution(
         config=auth_config, now=now_dt,
         price_fetch_fn=price_fetch_fn, max_quote_age_seconds=max_quote_age_seconds,
         max_price_drift_bps=max_price_drift_bps, audit_dir=audit_dir,
+        stop_loss_price=stop_loss_price,
     )
     if order_request["status"] == "AUTHORIZATION_ALREADY_CONSUMED":
         return _blocked(canonical_spec, "REPLAY_PROTECTION", order_request.get("reason"), order_request.get("detail"),

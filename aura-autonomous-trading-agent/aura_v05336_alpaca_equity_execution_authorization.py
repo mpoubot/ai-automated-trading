@@ -891,7 +891,8 @@ def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, A
                               now: datetime | None = None, price_fetch_fn: Any = None,
                               max_quote_age_seconds: float | None = None,
                               max_price_drift_bps: float | None = None,
-                              audit_dir: Path | None = None) -> dict[str, Any]:
+                              audit_dir: Path | None = None,
+                              stop_loss_price: Any | None = None) -> dict[str, Any]:
     """The documented, tested integration point between .36 authorization
     and .35 adapter validation/construction (module docstring's opening
     diagram).
@@ -1049,7 +1050,7 @@ def authorized_order_request(record: dict[str, Any], execution_spec: dict[str, A
     # un-consume the claim, so it must not be reported as though it
     # could.
     adapter35 = _load_adapter_module()
-    order_spec = adapter35.build_order_request_spec(execution_spec, alpaca_asset)
+    order_spec = adapter35.build_order_request_spec(execution_spec, alpaca_asset, stop_loss_price=stop_loss_price)
     alpaca_order_request = adapter35.to_alpaca_order_request(order_spec)
 
     result = {

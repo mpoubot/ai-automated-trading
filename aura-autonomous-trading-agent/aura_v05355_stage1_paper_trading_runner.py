@@ -240,6 +240,9 @@ class SymbolRequest:
     short_technical_regime: Any | None = None
     news_item_count: int = 0
     alpaca_asset: dict[str, Any] | None = None  # Stage 1A synthetic only; Stage 1B ignores this and fetches for real
+    planned_stop_distance: Any | None = None  # v0.5.3.35 ext (2026-10-27): the ATR-derived stop distance
+    # `.356.resolve_quantity_for_symbol()` already used to size this request -- carried forward so a real
+    # stop-loss order can be attached at the same distance (Martin: "the stoploss doesn't work correctly").
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,10 +688,8 @@ def run_stage1a_dry_run(
     called with NO client reports both venues `NOT_CONFIGURED`, and
     `NOT_CONFIGURED` is indeed not a *data-quality failure* -- but `.44`'s
     portfolio_heat/directional_exposure dimensions ALSO require a real
-    total-equity figure to compute a ratio at all -- and since the
-    2026-10-13 re-basing, so does `asset_concentration`, which keeps only
-    a flat-book carve-out (no positions => nothing to be concentrated in)
-    and otherwise reports NOT_COMPUTABLE without equity. With no
+    total-equity figure to compute a ratio at all (`asset_concentration`
+    is the only aggregate dimension with a flat-book carve-out). With no
     venue ever SUCCESS, `total_equity` is unknown, so both dimensions
     report `NOT_COMPUTABLE` and `.44` BLOCKs with `EXPOSURE_NOT_COMPUTABLE`
     -- unconditionally, even when `limits` leaves that dimension's numeric
@@ -819,6 +820,11 @@ def run_stage1a_dry_run(
             sentiment_regime=r.sentiment_regime, wave_result=r.wave_result,
             technical_regime=r.technical_regime, short_technical_regime=r.short_technical_regime,
             news_item_count=r.news_item_count, alpaca_asset=r.alpaca_asset,
+            tentative_long_stop_price=(
+                reference_price_fn(r.symbol) - r.planned_stop_distance
+                if reference_price_fn is not None and r.planned_stop_distance is not None
+                else None
+            ),
         )
         for r in symbol_requests
     )
@@ -1019,6 +1025,11 @@ def run_stage1b_paper_cycle(
             sentiment_regime=r.sentiment_regime, wave_result=r.wave_result,
             technical_regime=r.technical_regime, short_technical_regime=r.short_technical_regime,
             news_item_count=r.news_item_count, alpaca_asset=asset_by_symbol[r.symbol],
+            tentative_long_stop_price=(
+                reference_price_fn(r.symbol) - r.planned_stop_distance
+                if r.planned_stop_distance is not None
+                else None
+            ),
         )
         for r in usable_requests
     )
